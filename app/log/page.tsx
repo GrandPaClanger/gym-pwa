@@ -184,7 +184,7 @@ export default function LogPage() {
   return (
     <main style={{ maxWidth: 980, margin: "24px auto", padding: 16, fontFamily: "system-ui" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <h2 style={{ margin: 0 }}>Log Session</h2>
+        <h2 style={{ margin: 0 }}>swap test</h2>
         <a href="/">← Back</a>
       </div>
 
