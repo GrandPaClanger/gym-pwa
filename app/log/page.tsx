@@ -14,6 +14,12 @@ type PlanRow = {
   suggested_load_kg: number | null;
 };
 
+type Exercise = {
+  exercise_id: number;
+  canonical_name: string;
+  exercise_type: number; // 1 strength, 2 cardio
+};
+
 type StrengthSet = { reps: number; load_kg: number | null };
 type RowPayload =
   | { sequence_no: number; name: string; duration_min?: number; duration_sec?: number }
@@ -23,6 +29,11 @@ export default function LogPage() {
   const [rows, setRows] = useState<PlanRow[]>([]);
   const [durationMin, setDurationMin] = useState<number>(60);
   const [msg, setMsg] = useState<string>("");
+
+  const [exerciseList, setExerciseList] = useState<Exercise[]>([]);
+  const [addExerciseId, setAddExerciseId] = useState<number | "">("");
+
+  const today = () => new Date().toISOString().slice(0, 10);
 
   const loadToday = async () => {
     setMsg("");
@@ -35,16 +46,103 @@ export default function LogPage() {
     else setRows((data as PlanRow[]) ?? []);
   };
 
+  const loadExercises = async () => {
+    const { data, error } = await supabase
+      .from("exercise")
+      .select("exercise_id, canonical_name, exercise_type")
+      .order("canonical_name", { ascending: true });
+
+    if (error) setMsg(error.message);
+    else setExerciseList((data as Exercise[]) ?? []);
+  };
+
+  const getTodayPlanId = async (): Promise<number | null> => {
+    const { data, error } = await supabase
+      .from("workout_plan")
+      .select("plan_id")
+      .eq("plan_date", today())
+      .order("plan_id", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (error) {
+      setMsg(error.message);
+      return null;
+    }
+    if (!data?.plan_id) {
+      setMsg("No plan for today. Generate first.");
+      return null;
+    }
+    return data.plan_id as number;
+  };
+
+  const replaceExercise = async (sequence_no: number, new_exercise_id: number) => {
+    setMsg("");
+    const planId = await getTodayPlanId();
+    if (!planId) return;
+
+    const { error } = await supabase
+      .from("workout_plan_item")
+      .update({ exercise_id: new_exercise_id })
+      .eq("plan_id", planId)
+      .eq("sequence_no", sequence_no);
+
+    if (error) setMsg(error.message);
+    else await loadToday();
+  };
+
+  const addExercise = async () => {
+    if (addExerciseId === "") return;
+    setMsg("");
+
+    const planId = await getTodayPlanId();
+    if (!planId) return;
+
+    const { data: lastItem, error: seqErr } = await supabase
+      .from("workout_plan_item")
+      .select("sequence_no")
+      .eq("plan_id", planId)
+      .order("sequence_no", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (seqErr) return setMsg(seqErr.message);
+
+    const nextSeq = (lastItem?.sequence_no ?? 0) + 10;
+
+    const ex = exerciseList.find((e) => e.exercise_id === addExerciseId);
+    if (!ex) return setMsg("Exercise not found in list.");
+
+    const isCardio = ex.exercise_type === 2;
+
+    const { error: insErr } = await supabase.from("workout_plan_item").insert({
+      plan_id: planId,
+      sequence_no: nextSeq,
+      exercise_id: addExerciseId,
+      target_sets: isCardio ? 1 : 3,
+      target_reps: isCardio ? 1 : 10,
+      target_duration_sec: isCardio ? 300 : null,
+      target_load_kg: null,
+    });
+
+    if (insErr) setMsg(insErr.message);
+    else {
+      setAddExerciseId("");
+      await loadToday();
+    }
+  };
+
   useEffect(() => {
     loadToday();
+    loadExercises();
   }, []);
 
   const [loads, setLoads] = useState<Record<string, number | "">>({});
   const [reps, setReps] = useState<Record<string, number | "">>({});
 
   useEffect(() => {
-    const nextLoads: any = {};
-    const nextReps: any = {};
+    const nextLoads: Record<string, number | ""> = {};
+    const nextReps: Record<string, number | ""> = {};
     for (const r of rows) {
       if (r.exercise_type === 1) {
         nextLoads[r.exercise_name] = r.suggested_load_kg ?? "";
@@ -84,24 +182,52 @@ export default function LogPage() {
   };
 
   return (
-    <main style={{ maxWidth: 900, margin: "24px auto", padding: 16, fontFamily: "system-ui" }}>
+    <main style={{ maxWidth: 980, margin: "24px auto", padding: 16, fontFamily: "system-ui" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <h2 style={{ margin: 0 }}>Log Session</h2>
         <a href="/">← Back</a>
       </div>
 
-      <div style={{ marginTop: 12, display: "flex", gap: 12, alignItems: "center" }}>
+      <div style={{ marginTop: 12, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
         <label>
           Duration (min):{" "}
           <input
             type="number"
             value={durationMin}
             onChange={(e) => setDurationMin(Number(e.target.value))}
-            style={{ width: 80, padding: 6 }}
+            style={{ width: 90, padding: 6 }}
           />
         </label>
-        <button onClick={save} style={{ padding: 10 }}>Save session</button>
-        <button onClick={loadToday} style={{ padding: 10 }}>Refresh plan</button>
+        <button onClick={save} style={{ padding: 10 }}>
+          Save session
+        </button>
+        <button onClick={loadToday} style={{ padding: 10 }}>
+          Refresh plan
+        </button>
+      </div>
+
+      <div style={{ marginTop: 16, padding: 12, border: "1px solid #ddd", borderRadius: 8 }}>
+        <h3 style={{ marginTop: 0 }}>Edit today’s plan</h3>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <select
+            value={addExerciseId}
+            onChange={(e) => setAddExerciseId(e.target.value === "" ? "" : Number(e.target.value))}
+            style={{ padding: 8, minWidth: 280 }}
+          >
+            <option value="">Add an exercise…</option>
+            {exerciseList.map((ex) => (
+              <option key={ex.exercise_id} value={ex.exercise_id}>
+                {ex.canonical_name}
+              </option>
+            ))}
+          </select>
+          <button onClick={addExercise} style={{ padding: 10 }}>
+            Add
+          </button>
+        </div>
+        <div style={{ marginTop: 8, fontSize: 13, opacity: 0.75 }}>
+          Swap uses the dropdown beside each row. Add appends to the end.
+        </div>
       </div>
 
       {msg && <p style={{ marginTop: 12 }}>{msg}</p>}
@@ -112,7 +238,7 @@ export default function LogPage() {
             <th style={th}>#</th>
             <th style={th}>Exercise</th>
             <th style={th}>Type</th>
-            <th style={th}>Edit</th>
+            <th style={th}>Edit / Swap</th>
           </tr>
         </thead>
         <tbody>
@@ -122,41 +248,62 @@ export default function LogPage() {
               <td style={td}>{r.exercise_name}</td>
               <td style={td}>{r.exercise_type === 2 ? "Cardio" : "Strength"}</td>
               <td style={td}>
-                {r.exercise_type === 2 ? (
-                  <span>{Math.round((r.target_duration_sec ?? 300) / 60)} min</span>
-                ) : (
-                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                    <label>
-                      Reps:{" "}
-                      <input
-                        type="number"
-                        value={reps[r.exercise_name] ?? ""}
-                        onChange={(e) =>
-                          setReps((prev) => ({
-                            ...prev,
-                            [r.exercise_name]: e.target.value === "" ? "" : Number(e.target.value),
-                          }))
-                        }
-                        style={{ width: 80, padding: 6 }}
-                      />
-                    </label>
-                    <label>
-                      Load (kg):{" "}
-                      <input
-                        type="number"
-                        value={loads[r.exercise_name] ?? ""}
-                        onChange={(e) =>
-                          setLoads((prev) => ({
-                            ...prev,
-                            [r.exercise_name]: e.target.value === "" ? "" : Number(e.target.value),
-                          }))
-                        }
-                        style={{ width: 110, padding: 6 }}
-                      />
-                    </label>
-                    <span>Sets: {r.target_sets ?? 3}</span>
-                  </div>
-                )}
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                  <select
+                    defaultValue=""
+                    onChange={(e) => {
+                      const v = Number(e.target.value);
+                      if (v) replaceExercise(r.sequence_no, v);
+                    }}
+                    style={{ padding: 6, minWidth: 240 }}
+                    title="Swap exercise"
+                  >
+                    <option value="">Swap exercise…</option>
+                    {exerciseList.map((ex) => (
+                      <option key={ex.exercise_id} value={ex.exercise_id}>
+                        {ex.canonical_name}
+                      </option>
+                    ))}
+                  </select>
+
+                  {r.exercise_type === 2 ? (
+                    <span>{Math.round((r.target_duration_sec ?? 300) / 60)} min</span>
+                  ) : (
+                    <>
+                      <label>
+                        Reps:{" "}
+                        <input
+                          type="number"
+                          value={reps[r.exercise_name] ?? ""}
+                          onChange={(e) =>
+                            setReps((prev) => ({
+                              ...prev,
+                              [r.exercise_name]: e.target.value === "" ? "" : Number(e.target.value),
+                            }))
+                          }
+                          style={{ width: 80, padding: 6 }}
+                        />
+                      </label>
+
+                      <label>
+                        Load (kg):{" "}
+                        <input
+                          type="number"
+                          value={loads[r.exercise_name] ?? ""}
+                          onChange={(e) =>
+                            setLoads((prev) => ({
+                              ...prev,
+                              [r.exercise_name]: e.target.value === "" ? "" : Number(e.target.value),
+                            }))
+                          }
+                          style={{ width: 110, padding: 6 }}
+                        />
+                      </label>
+
+                      <span>Sets: {r.target_sets ?? 3}</span>
+                    </>
+                  )}
+                </div>
               </td>
             </tr>
           ))}
