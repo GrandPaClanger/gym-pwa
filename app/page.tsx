@@ -26,7 +26,7 @@ function isoDate(d: Date) {
 }
 
 // Visible version marker (helps confirm GitHub/Vercel deploy is the right build)
-const BUILD_TAG = "2025-12-27 local-sync-02";
+const BUILD_TAG = "2025-12-27 local-sync-03";
 
 export default function HomePage() {
   const [sessionReady, setSessionReady] = useState(false);
