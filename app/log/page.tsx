@@ -28,6 +28,9 @@ type RowPayload =
 const rowKey = (r: PlanRow) => `${r.plan_date}-${r.sequence_no}`;
 const todayIso = () => new Date().toISOString().slice(0, 10);
 
+// Persist one sessionStart per day so multiple saves don't create multiple sessions
+const sessionStartStorageKey = () => `gym_session_start_${todayIso()}`;
+
 export default function LogPage() {
   const [sessionReady, setSessionReady] = useState(false);
   const [isAuthed, setIsAuthed] = useState(false);
@@ -42,6 +45,9 @@ export default function LogPage() {
 
   const [loads, setLoads] = useState<Record<string, number | "">>({});
   const [reps, setReps] = useState<Record<string, number | "">>({});
+
+  // ✅ Stable session start (does NOT change on every save)
+  const [sessionStart, setSessionStart] = useState<string | null>(null);
 
   const loadToday = async () => {
     setMsg("");
@@ -68,6 +74,7 @@ export default function LogPage() {
     else setExerciseList((data as Exercise[]) ?? []);
   };
 
+  // Auth + initial load
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
       const ok = !!data.session;
@@ -88,6 +95,7 @@ export default function LogPage() {
         loadExercises();
       } else {
         setRows([]);
+        setSessionStart(null);
       }
     });
 
@@ -95,6 +103,22 @@ export default function LogPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ✅ On login, restore or create sessionStart for today (persists across refresh)
+  useEffect(() => {
+    if (!isAuthed) return;
+
+    const key = sessionStartStorageKey();
+    const existing = window.localStorage.getItem(key);
+    if (existing) {
+      setSessionStart(existing);
+    } else {
+      const fresh = new Date().toISOString();
+      window.localStorage.setItem(key, fresh);
+      setSessionStart(fresh);
+    }
+  }, [isAuthed]);
+
+  // When plan rows load, prefill loads/reps maps
   useEffect(() => {
     const nextLoads: Record<string, number | ""> = {};
     const nextReps: Record<string, number | ""> = {};
@@ -121,7 +145,8 @@ export default function LogPage() {
 
       const k = rowKey(r);
       const s = r.target_sets ?? 3;
-      const rep = reps[k] === "" || reps[k] == null ? (r.target_reps ?? 10) : Number(reps[k]);
+      const rep =
+        reps[k] === "" || reps[k] == null ? (r.target_reps ?? 10) : Number(reps[k]);
       const load = loads[k] === "" || loads[k] == null ? null : Number(loads[k]);
 
       return {
@@ -176,7 +201,6 @@ export default function LogPage() {
     else await loadToday();
   };
 
-  // NEW: remove this item from today's plan (does not delete the exercise)
   const removeExercise = async (sequence_no: number) => {
     setMsg("");
     const planId = await getTodayPlanId();
@@ -236,17 +260,34 @@ export default function LogPage() {
     }
   };
 
+  // ✅ Start a fresh session (only when YOU choose)
+  const newSession = () => {
+    const key = sessionStartStorageKey();
+    window.localStorage.removeItem(key);
+    const fresh = new Date().toISOString();
+    window.localStorage.setItem(key, fresh);
+    setSessionStart(fresh);
+    setMsg("New session started (same plan, new session header).");
+  };
+
   const save = async () => {
     setMsg("");
+    if (!sessionStart) {
+      setMsg("Session start not initialised yet. Try again.");
+      return;
+    }
+
     const { error } = await supabase.rpc("log_session_json", {
-      p_session_start: new Date().toISOString(),
+      p_session_start: sessionStart, // ✅ stable across multiple saves
       p_duration_min: durationMin,
       p_rows: payload,
     });
-    setMsg(error ? error.message : "Saved.");
+
+    setMsg(error ? error.message : `Saved (sessionStart=${sessionStart}).`);
   };
 
-  if (!sessionReady) return <main style={{ padding: 24, fontFamily: "system-ui" }}>Loading…</main>;
+  if (!sessionReady)
+    return <main style={{ padding: 24, fontFamily: "system-ui" }}>Loading…</main>;
 
   if (!isAuthed) {
     return (
@@ -278,6 +319,10 @@ export default function LogPage() {
         <a href="/">← Back</a>
       </div>
 
+      <div style={{ marginTop: 6, fontSize: 13, opacity: 0.75 }}>
+        Session start (stable): <code>{sessionStart ?? "…"}</code>
+      </div>
+
       <div style={{ marginTop: 12, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
         <label>
           Duration (min):{" "}
@@ -288,12 +333,19 @@ export default function LogPage() {
             style={{ width: 90, padding: 6 }}
           />
         </label>
+
         <button onClick={save} style={{ padding: 10 }}>
           Save session
         </button>
+
+        <button onClick={newSession} style={{ padding: 10 }}>
+          New session
+        </button>
+
         <button onClick={loadToday} style={{ padding: 10 }}>
           Refresh plan
         </button>
+
         <span style={{ opacity: 0.7 }}>Rows loaded: {rows.length}</span>
       </div>
 
