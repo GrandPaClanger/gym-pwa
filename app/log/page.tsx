@@ -315,7 +315,6 @@ export default function LogPage() {
     }
 
     const { error } = await supabase.rpc("log_session_json", {
-      p_plan_date: todayIso(),
       p_session_start: sessionStart,
       p_duration_min: durationMin,
       p_rows: payload,
