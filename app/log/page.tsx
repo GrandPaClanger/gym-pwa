@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 
 type PlanRow = {
@@ -49,6 +49,12 @@ export default function LogPage() {
   // ✅ Stable session start (does NOT change on every save)
   const [sessionStart, setSessionStart] = useState<string | null>(null);
 
+  // Cache today's plan_id so autosave doesn't keep querying
+  const [todayPlanId, setTodayPlanId] = useState<number | null>(null);
+
+  // Debounce timers per row
+  const autosaveTimers = useRef<Record<string, any>>({});
+
   const loadToday = async () => {
     setMsg("");
     const { data, error } = await supabase
@@ -74,6 +80,51 @@ export default function LogPage() {
     else setExerciseList((data as Exercise[]) ?? []);
   };
 
+  const getTodayPlanId = async (): Promise<number | null> => {
+    if (todayPlanId) return todayPlanId;
+
+    const { data, error } = await supabase
+      .from("workout_plan")
+      .select("plan_id")
+      .eq("plan_date", todayIso())
+      .order("plan_id", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (error) {
+      setMsg(error.message);
+      return null;
+    }
+    if (!data?.plan_id) {
+      setMsg("No plan for today. Generate it on the home page first.");
+      return null;
+    }
+
+    const pid = data.plan_id as number;
+    setTodayPlanId(pid);
+    return pid;
+  };
+
+  // Debounced autosave to workout_plan_item by plan_id + sequence_no
+  const queueAutosave = async (sequence_no: number, patch: Record<string, any>) => {
+    const planId = await getTodayPlanId();
+    if (!planId) return;
+
+    const k = `${planId}-${sequence_no}`;
+
+    if (autosaveTimers.current[k]) clearTimeout(autosaveTimers.current[k]);
+
+    autosaveTimers.current[k] = setTimeout(async () => {
+      const { error } = await supabase
+        .from("workout_plan_item")
+        .update(patch)
+        .eq("plan_id", planId)
+        .eq("sequence_no", sequence_no);
+
+      if (error) setMsg(`Autosave failed: ${error.message}`);
+    }, 500);
+  };
+
   // Auth + initial load
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
@@ -83,6 +134,7 @@ export default function LogPage() {
       if (ok) {
         loadToday();
         loadExercises();
+        // plan_id will be fetched lazily when needed
       }
     });
 
@@ -96,6 +148,7 @@ export default function LogPage() {
       } else {
         setRows([]);
         setSessionStart(null);
+        setTodayPlanId(null);
       }
     });
 
@@ -118,19 +171,27 @@ export default function LogPage() {
     }
   }, [isAuthed]);
 
-  // When plan rows load, prefill loads/reps maps
+  // When plan rows load, prefill loads/reps maps WITHOUT overwriting existing edits
   useEffect(() => {
-    const nextLoads: Record<string, number | ""> = {};
-    const nextReps: Record<string, number | ""> = {};
-    for (const r of rows) {
-      if (r.exercise_type === 1) {
+    setLoads((prev) => {
+      const next = { ...prev };
+      for (const r of rows) {
+        if (r.exercise_type !== 1) continue;
         const k = rowKey(r);
-        nextLoads[k] = r.suggested_load_kg ?? "";
-        nextReps[k] = r.target_reps ?? 10;
+        if (next[k] === undefined) next[k] = r.suggested_load_kg ?? "";
       }
-    }
-    setLoads(nextLoads);
-    setReps(nextReps);
+      return next;
+    });
+
+    setReps((prev) => {
+      const next = { ...prev };
+      for (const r of rows) {
+        if (r.exercise_type !== 1) continue;
+        const k = rowKey(r);
+        if (next[k] === undefined) next[k] = r.target_reps ?? 10;
+      }
+      return next;
+    });
   }, [rows]);
 
   const payload: RowPayload[] = useMemo(() => {
@@ -145,8 +206,7 @@ export default function LogPage() {
 
       const k = rowKey(r);
       const s = r.target_sets ?? 3;
-      const rep =
-        reps[k] === "" || reps[k] == null ? (r.target_reps ?? 10) : Number(reps[k]);
+      const rep = reps[k] === "" || reps[k] == null ? r.target_reps ?? 10 : Number(reps[k]);
       const load = loads[k] === "" || loads[k] == null ? null : Number(loads[k]);
 
       return {
@@ -164,26 +224,6 @@ export default function LogPage() {
       options: { emailRedirectTo: window.location.origin },
     });
     setMsg(error ? error.message : "Magic link sent. Check your email.");
-  };
-
-  const getTodayPlanId = async (): Promise<number | null> => {
-    const { data, error } = await supabase
-      .from("workout_plan")
-      .select("plan_id")
-      .eq("plan_date", todayIso())
-      .order("plan_id", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    if (error) {
-      setMsg(error.message);
-      return null;
-    }
-    if (!data?.plan_id) {
-      setMsg("No plan for today. Generate it on the home page first.");
-      return null;
-    }
-    return data.plan_id as number;
   };
 
   const replaceExercise = async (sequence_no: number, new_exercise_id: number) => {
@@ -380,7 +420,6 @@ export default function LogPage() {
           <tr>
             <th style={th}>#</th>
             <th style={th}>Exercise</th>
-            <th style={th}>Type</th>
             <th style={th}>Edit / Swap</th>
           </tr>
         </thead>
@@ -391,7 +430,6 @@ export default function LogPage() {
               <tr key={k}>
                 <td style={td}>{r.sequence_no}</td>
                 <td style={td}>{r.exercise_name}</td>
-                <td style={td}>{r.exercise_type === 2 ? "Cardio" : "Strength"}</td>
                 <td style={td}>
                   <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
                     <select
@@ -428,12 +466,11 @@ export default function LogPage() {
                           <input
                             type="number"
                             value={reps[k] ?? ""}
-                            onChange={(e) =>
-                              setReps((prev) => ({
-                                ...prev,
-                                [k]: e.target.value === "" ? "" : Number(e.target.value),
-                              }))
-                            }
+                            onChange={(e) => {
+                              const v = e.target.value === "" ? "" : Number(e.target.value);
+                              setReps((prev) => ({ ...prev, [k]: v }));
+                              if (v !== "") queueAutosave(r.sequence_no, { target_reps: v });
+                            }}
                             style={{ width: 80, padding: 6 }}
                           />
                         </label>
@@ -443,12 +480,11 @@ export default function LogPage() {
                           <input
                             type="number"
                             value={loads[k] ?? ""}
-                            onChange={(e) =>
-                              setLoads((prev) => ({
-                                ...prev,
-                                [k]: e.target.value === "" ? "" : Number(e.target.value),
-                              }))
-                            }
+                            onChange={(e) => {
+                              const v = e.target.value === "" ? "" : Number(e.target.value);
+                              setLoads((prev) => ({ ...prev, [k]: v }));
+                              if (v !== "") queueAutosave(r.sequence_no, { target_load_kg: v });
+                            }}
                             style={{ width: 110, padding: 6 }}
                           />
                         </label>
@@ -464,7 +500,7 @@ export default function LogPage() {
 
           {rows.length === 0 && (
             <tr>
-              <td style={td} colSpan={4}>
+              <td style={td} colSpan={3}>
                 No plan rows returned (try Refresh plan).
               </td>
             </tr>
