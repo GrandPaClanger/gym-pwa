@@ -25,9 +25,6 @@ function isoDate(d: Date) {
   return d.toISOString().slice(0, 10);
 }
 
-// Visible version marker (helps confirm GitHub/Vercel deploy is the right build)
-const BUILD_TAG = "2025-12-28 local-sync-L1";
-
 export default function HomePage() {
   const [sessionReady, setSessionReady] = useState(false);
   const [isAuthed, setIsAuthed] = useState(false);
@@ -96,18 +93,12 @@ export default function HomePage() {
     return () => sub.subscription.unsubscribe();
   }, []);
 
-  if (!sessionReady)
-    return <main style={{ padding: 24, fontFamily: "system-ui" }}>Loading…</main>;
+  if (!sessionReady) return <main style={{ padding: 24, fontFamily: "system-ui" }}>Loading…</main>;
 
   if (!isAuthed) {
     return (
       <main style={{ maxWidth: 520, margin: "40px auto", padding: 16, fontFamily: "system-ui" }}>
         <h2 style={{ marginTop: 0 }}>Gym PWA</h2>
-
-        <div style={{ opacity: 0.55, fontSize: 12, marginTop: -6, marginBottom: 12 }}>
-          build: {BUILD_TAG}
-        </div>
-
         <p>Login (magic link)</p>
 
         <div style={{ display: "flex", gap: 8 }}>
@@ -129,20 +120,8 @@ export default function HomePage() {
 
   return (
     <main style={{ maxWidth: 980, margin: "24px auto", padding: 16, fontFamily: "system-ui" }}>
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          gap: 8,
-          flexWrap: "wrap",
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
-          <h2 style={{ margin: 0 }}>Today ({ddmmyyyy(today)})</h2>
-          <div style={{ opacity: 0.55, fontSize: 12 }}>build: {BUILD_TAG}</div>
-        </div>
-
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <h2 style={{ margin: 0 }}>Today ({ddmmyyyy(today)})</h2>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <button onClick={generatePlan} style={{ padding: 10 }}>
             Generate / Regenerate
@@ -202,14 +181,5 @@ export default function HomePage() {
   );
 }
 
-const th: React.CSSProperties = {
-  textAlign: "left",
-  borderBottom: "1px solid #ddd",
-  padding: 10,
-};
-
-const td: React.CSSProperties = {
-  borderBottom: "1px solid #eee",
-  padding: 10,
-  verticalAlign: "top",
-};
+const th: React.CSSProperties = { textAlign: "left", borderBottom: "1px solid #ddd", padding: 10 };
+const td: React.CSSProperties = { borderBottom: "1px solid #eee", padding: 10, verticalAlign: "top" };
