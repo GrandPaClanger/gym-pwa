@@ -108,7 +108,7 @@ export default function NewStrengthExerciseClient({ returnTo }: { returnTo: stri
               textDecoration: "none",
               border: "1px solid #ddd",
               borderRadius: 8,
-              color: "#111",
+              color: "inherit",
             }}
           >
             Cancel

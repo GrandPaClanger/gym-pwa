@@ -460,7 +460,7 @@ export default function LogPage() {
                 border: "1px solid #ddd",
                 borderRadius: 8,
                 textDecoration: "none",
-                color: "#111",
+                color: "inherit",
               }}
             >
               New strength exercise
