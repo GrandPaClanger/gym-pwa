@@ -27,6 +27,7 @@ type RowPayload =
   | { sequence_no: number; name: string; sets: StrengthSet[] };
 
 const rowKey = (r: PlanRow) => `${r.plan_date}-${r.sequence_no}`;
+const slotKey = (plan_date: string, sequence_no: number) => `${plan_date}-${sequence_no}`;
 const todayIso = () => new Date().toISOString().slice(0, 10);
 
 export default function LogPage() {
@@ -180,7 +181,7 @@ export default function LogPage() {
     }, 500);
   };
 
-  // When plan rows load, prefill loads/reps maps WITHOUT overwriting existing edits
+  // When plan rows load, prefill loads/reps/sets WITHOUT overwriting existing edits
   useEffect(() => {
     setLoads((prev) => {
       const next = { ...prev };
@@ -250,14 +251,72 @@ export default function LogPage() {
     const planId = await getTodayPlanId();
     if (!planId) return;
 
+    const planDate = todayIso();
+    const k = slotKey(planDate, sequence_no);
+    const newExercise = exerciseList.find((e) => e.exercise_id === new_exercise_id);
+
+    // 1) swap in DB
     const { error } = await supabase
       .from("workout_plan_item")
       .update({ exercise_id: new_exercise_id })
       .eq("plan_id", planId)
       .eq("sequence_no", sequence_no);
 
-    if (error) setMsg(error.message);
-    else await loadToday();
+    if (error) {
+      setMsg(error.message);
+      return;
+    }
+
+    // 2) clear local edits for this slot (otherwise old values stick)
+    setLoads((p) => {
+      const n = { ...p };
+      delete n[k];
+      return n;
+    });
+    setReps((p) => {
+      const n = { ...p };
+      delete n[k];
+      return n;
+    });
+    setSets((p) => {
+      const n = { ...p };
+      delete n[k];
+      return n;
+    });
+
+    // 3) refresh rows so exercise name/type updates
+    await loadToday();
+
+    // If swapped to cardio, nothing else to set here
+    if (newExercise?.exercise_type === 2) return;
+
+    // 4) fetch last logged values for the new exercise
+    const { data, error: err2 } = await supabase
+      .from("v_last_exercise_values")
+      .select("last_sets,last_reps,last_load_kg")
+      .eq("exercise_id", new_exercise_id)
+      .maybeSingle();
+
+    if (err2) {
+      setMsg(err2.message);
+      return;
+    }
+
+    const nextSets = (data?.last_sets ?? 3) as number;
+    const nextReps = (data?.last_reps ?? 10) as number;
+    const nextLoad = (data?.last_load_kg ?? null) as number | null;
+
+    // 5) apply to UI state immediately
+    setSets((p) => ({ ...p, [k]: nextSets }));
+    setReps((p) => ({ ...p, [k]: nextReps }));
+    setLoads((p) => ({ ...p, [k]: nextLoad ?? "" }));
+
+    // 6) autosave targets so refresh is correct
+    queueAutosave(sequence_no, {
+      target_sets: nextSets,
+      target_reps: nextReps,
+      target_load_kg: nextLoad,
+    });
   };
 
   const removeExercise = async (sequence_no: number) => {
@@ -434,9 +493,7 @@ export default function LogPage() {
                         </button>
 
                         {r.exercise_type === 2 ? (
-                          <span style={{ color: "#555" }}>
-                            Duration (sec): {r.target_duration_sec ?? 300}
-                          </span>
+                          <span style={{ color: "#555" }}>Duration (sec): {r.target_duration_sec ?? 300}</span>
                         ) : (
                           <>
                             <label>
