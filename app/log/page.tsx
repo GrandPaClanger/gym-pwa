@@ -447,9 +447,24 @@ export default function LogPage() {
                 </option>
               ))}
             </select>
+
             <button onClick={addExercise} style={{ padding: "10px 14px" }}>
               Add
             </button>
+
+            {/* ✅ New strength exercise screen */}
+            <a
+              href="/exercises/new?return=/log"
+              style={{
+                padding: "10px 14px",
+                border: "1px solid #ddd",
+                borderRadius: 8,
+                textDecoration: "none",
+                color: "#111",
+              }}
+            >
+              New strength exercise
+            </a>
           </div>
 
           {msg && <div style={{ marginBottom: 14, color: "#b00020" }}>{msg}</div>}
