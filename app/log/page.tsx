@@ -508,7 +508,7 @@ export default function LogPage() {
                         </button>
 
                         {r.exercise_type === 2 ? (
-                          <span style={{ color: "#555" }}>Duration (sec): {r.target_duration_sec ?? 300}</span>
+                          <span style={{ color: "#555" }}>Duration (min): {Math.round(((r.target_duration_sec ?? 300) as number) / 60)}</span>
                         ) : (
                           <>
                             <label>
