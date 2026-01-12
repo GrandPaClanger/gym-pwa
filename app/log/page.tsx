@@ -30,8 +30,12 @@ const rowKey = (r: PlanRow) => `${r.plan_date}-${r.sequence_no}`;
 const slotKey = (plan_date: string, sequence_no: number) => `${plan_date}-${sequence_no}`;
 const todayIso = () => new Date().toISOString().slice(0, 10);
 
-// Add exercise: show the full list by default, and narrow it as you type.
+// reps validation (prevents fat-finger saves like 1 rep)
+const REP_MIN = 8;
+const REP_MAX = 20;
+const isValidReps = (n: number) => Number.isFinite(n) && Number.isInteger(n) && n >= REP_MIN && n <= REP_MAX;
 
+// Add exercise: show the full list by default, and narrow it as you type.
 export default function LogPage() {
   const [isAuthed, setIsAuthed] = useState(false);
   const [email, setEmail] = useState("");
@@ -227,7 +231,13 @@ export default function LogPage() {
 
       const k = rowKey(r);
       const s = sets[k] === "" || sets[k] == null ? (r.target_sets ?? 3) : Number(sets[k]);
-      const rep = reps[k] === "" || reps[k] == null ? r.target_reps ?? 10 : Number(reps[k]);
+
+      const repRaw =
+        reps[k] === "" || reps[k] == null ? (r.target_reps ?? 10) : Number(reps[k]);
+
+      // keep payload safe even if the input is currently invalid
+      const rep = isValidReps(repRaw) ? repRaw : (r.target_reps ?? 10);
+
       const load = loads[k] === "" || loads[k] == null ? null : Number(loads[k]);
 
       return {
@@ -304,7 +314,10 @@ export default function LogPage() {
     }
 
     const nextSets = (data?.last_sets ?? 3) as number;
-    const nextReps = (data?.last_reps ?? 10) as number;
+
+    const lr = (data?.last_reps ?? 10) as number;
+    const nextReps = isValidReps(lr) ? lr : 10;
+
     const nextLoad = (data?.last_load_kg ?? null) as number | null;
 
     // 5) apply to UI state immediately
@@ -375,13 +388,13 @@ export default function LogPage() {
       return;
     }
 
-    // reps validation (prevents fat-finger saves like 1 rep)
+    // reps validation (hard block)
     for (const r of rows) {
       if (r.exercise_type !== 1) continue;
       const k = rowKey(r);
-      const repRaw = reps[k] === "" || reps[k] == null ? r.target_reps ?? 10 : Number(reps[k]);
-      const rep = clampReps(repRaw);
-      if (repRaw < REP_MIN || repRaw > REP_MAX) {
+      const repRaw =
+        reps[k] === "" || reps[k] == null ? (r.target_reps ?? 10) : Number(reps[k]);
+      if (!isValidReps(repRaw)) {
         setMsg(`Reps out of range for "${r.exercise_name}" (must be ${REP_MIN}-${REP_MAX}).`);
         return;
       }
@@ -486,7 +499,6 @@ export default function LogPage() {
                   </option>
                 ))}
               </select>
-
             </div>
 
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginTop: 34 }}>
@@ -569,11 +581,26 @@ export default function LogPage() {
                               Reps:{" "}
                               <input
                                 type="number"
+                                min={REP_MIN}
+                                max={REP_MAX}
                                 value={reps[k] ?? ""}
                                 onChange={(e) => {
-                                  const v = e.target.value === "" ? "" : Number(e.target.value);
-                                  setReps((prev) => ({ ...prev, [k]: v }));
-                                  if (v !== "") queueAutosave(r.sequence_no, { target_reps: v });
+                                  if (e.target.value === "") {
+                                    setReps((prev) => ({ ...prev, [k]: "" }));
+                                    return;
+                                  }
+
+                                  const raw = Number(e.target.value);
+
+                                  // keep what the user typed, but DO NOT autosave until it's valid
+                                  setReps((prev) => ({ ...prev, [k]: raw }));
+
+                                  if (!isValidReps(raw)) {
+                                    setMsg(`Reps must be ${REP_MIN}-${REP_MAX}.`);
+                                    return;
+                                  }
+
+                                  queueAutosave(r.sequence_no, { target_reps: raw });
                                 }}
                                 style={{ width: 80, padding: 6 }}
                               />
