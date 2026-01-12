@@ -41,6 +41,9 @@ export default function LogPage() {
   const [exerciseList, setExerciseList] = useState<Exercise[]>([]);
   const [addExerciseId, setAddExerciseId] = useState<number | "">("");
 
+  // ✅ Predictive filter for Add exercise…
+  const [addExerciseQuery, setAddExerciseQuery] = useState<string>("");
+
   const [loads, setLoads] = useState<Record<string, number | "">>({});
   const [reps, setReps] = useState<Record<string, number | "">>({});
   const [sets, setSets] = useState<Record<string, number | "">>({});
@@ -269,7 +272,7 @@ export default function LogPage() {
 
     // 2) clear local edits for this slot (otherwise old values stick)
     setLoads((p) => {
-      const n = { ...p };
+      const n = {t = { ...p };
       delete n[k];
       return n;
     });
@@ -362,6 +365,7 @@ export default function LogPage() {
     if (error) setMsg(error.message);
     else {
       setAddExerciseId("");
+      setAddExerciseQuery(""); // ✅ reset filter
       await loadToday();
     }
   };
@@ -381,6 +385,13 @@ export default function LogPage() {
 
     setMsg(error ? error.message : "Session saved.");
   };
+
+  // ✅ Filtered list for Add exercise… (limits options for speed)
+  const filteredAddExercises = useMemo(() => {
+    const q = addExerciseQuery.trim().toLowerCase();
+    if (!q) return exerciseList;
+    return exerciseList.filter((e) => e.canonical_name.toLowerCase().includes(q));
+  }, [exerciseList, addExerciseQuery]);
 
   return (
     <main style={{ padding: 20, maxWidth: 1100, margin: "0 auto", fontFamily: "system-ui, sans-serif" }}>
@@ -434,14 +445,22 @@ export default function LogPage() {
             </button>
           </div>
 
+          {/* ✅ Add exercise with predictive filter */}
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginBottom: 14 }}>
+            <input
+              value={addExerciseQuery}
+              onChange={(e) => setAddExerciseQuery(e.target.value)}
+              placeholder="Search exercises…"
+              style={{ padding: 10, minWidth: 260 }}
+            />
+
             <select
               value={addExerciseId}
               onChange={(e) => setAddExerciseId(e.target.value === "" ? "" : Number(e.target.value))}
               style={{ padding: 10, minWidth: 320 }}
             >
               <option value="">Add exercise…</option>
-              {exerciseList.map((e) => (
+              {filteredAddExercises.slice(0, 300).map((e) => (
                 <option key={e.exercise_id} value={e.exercise_id}>
                   {e.canonical_name}
                 </option>
@@ -450,6 +469,16 @@ export default function LogPage() {
 
             <button onClick={addExercise} style={{ padding: "10px 14px" }}>
               Add
+            </button>
+
+            <button
+              onClick={() => {
+                setAddExerciseQuery("");
+                setAddExerciseId("");
+              }}
+              style={{ padding: "10px 14px" }}
+            >
+              Clear
             </button>
 
             {/* ✅ New strength exercise screen */}
@@ -508,7 +537,9 @@ export default function LogPage() {
                         </button>
 
                         {r.exercise_type === 2 ? (
-                          <span style={{ color: "#555" }}>Duration (min): {Math.round(((r.target_duration_sec ?? 300) as number) / 60)}</span>
+                          <span style={{ color: "#555" }}>
+                            Duration (min): {Math.round(((r.target_duration_sec ?? 300) as number) / 60)}
+                          </span>
                         ) : (
                           <>
                             <label>
