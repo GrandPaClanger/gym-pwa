@@ -272,7 +272,7 @@ export default function LogPage() {
 
     // 2) clear local edits for this slot (otherwise old values stick)
     setLoads((p) => {
-      const n = {t = { ...p };
+      const n = { ...p };
       delete n[k];
       return n;
     });
