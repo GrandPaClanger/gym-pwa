@@ -30,6 +30,9 @@ const rowKey = (r: PlanRow) => `${r.plan_date}-${r.sequence_no}`;
 const slotKey = (plan_date: string, sequence_no: number) => `${plan_date}-${sequence_no}`;
 const todayIso = () => new Date().toISOString().slice(0, 10);
 
+// keep UI snappy if you ever end up with thousands of exercises
+const ADD_EXERCISE_MAX_OPTIONS = 500;
+
 export default function LogPage() {
   const [isAuthed, setIsAuthed] = useState(false);
   const [email, setEmail] = useState("");
@@ -386,12 +389,16 @@ export default function LogPage() {
     setMsg(error ? error.message : "Session saved.");
   };
 
-  // ✅ Filtered list for Add exercise… (limits options for speed)
+  // ✅ Filtered list for Add exercise…
   const filteredAddExercises = useMemo(() => {
     const q = addExerciseQuery.trim().toLowerCase();
     if (!q) return exerciseList;
     return exerciseList.filter((e) => e.canonical_name.toLowerCase().includes(q));
   }, [exerciseList, addExerciseQuery]);
+
+  const addExerciseOptions = useMemo(() => {
+    return filteredAddExercises.slice(0, ADD_EXERCISE_MAX_OPTIONS);
+  }, [filteredAddExercises]);
 
   return (
     <main style={{ padding: 20, maxWidth: 1100, margin: "0 auto", fontFamily: "system-ui, sans-serif" }}>
@@ -445,55 +452,65 @@ export default function LogPage() {
             </button>
           </div>
 
-          {/* ✅ Add exercise with predictive filter */}
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginBottom: 14 }}>
-            <input
-              value={addExerciseQuery}
-              onChange={(e) => setAddExerciseQuery(e.target.value)}
-              placeholder="Search exercises…"
-              style={{ padding: 10, minWidth: 260 }}
-            />
+          {/* ✅ Add exercise: show full list and whittle down as you type */}
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-start", marginBottom: 14 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <input
+                value={addExerciseQuery}
+                onChange={(e) => setAddExerciseQuery(e.target.value)}
+                placeholder="Type to filter…"
+                style={{ padding: 10, minWidth: 260 }}
+              />
 
-            <select
-              value={addExerciseId}
-              onChange={(e) => setAddExerciseId(e.target.value === "" ? "" : Number(e.target.value))}
-              style={{ padding: 10, minWidth: 320 }}
-            >
-              <option value="">Add exercise…</option>
-              {filteredAddExercises.slice(0, 300).map((e) => (
-                <option key={e.exercise_id} value={e.exercise_id}>
-                  {e.canonical_name}
-                </option>
-              ))}
-            </select>
+              <select
+                value={addExerciseId}
+                onChange={(e) => setAddExerciseId(e.target.value === "" ? "" : Number(e.target.value))}
+                size={10} // ✅ always-open listbox so you see it narrowing live
+                style={{ padding: 10, minWidth: 320 }}
+              >
+                <option value="">Select exercise…</option>
+                {addExerciseOptions.map((e) => (
+                  <option key={e.exercise_id} value={e.exercise_id}>
+                    {e.canonical_name}
+                  </option>
+                ))}
+              </select>
 
-            <button onClick={addExercise} style={{ padding: "10px 14px" }}>
-              Add
-            </button>
+              {filteredAddExercises.length > ADD_EXERCISE_MAX_OPTIONS && (
+                <div style={{ color: "#777", fontSize: 12 }}>
+                  Showing first {ADD_EXERCISE_MAX_OPTIONS} matches — keep typing to narrow.
+                </div>
+              )}
+            </div>
 
-            <button
-              onClick={() => {
-                setAddExerciseQuery("");
-                setAddExerciseId("");
-              }}
-              style={{ padding: "10px 14px" }}
-            >
-              Clear
-            </button>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginTop: 34 }}>
+              <button onClick={addExercise} style={{ padding: "10px 14px" }}>
+                Add
+              </button>
 
-            {/* ✅ New strength exercise screen */}
-            <a
-              href="/exercises/new?return=/log"
-              style={{
-                padding: "10px 14px",
-                border: "1px solid #ddd",
-                borderRadius: 8,
-                textDecoration: "none",
-                color: "inherit",
-              }}
-            >
-              New strength exercise
-            </a>
+              <button
+                onClick={() => {
+                  setAddExerciseQuery("");
+                  setAddExerciseId("");
+                }}
+                style={{ padding: "10px 14px" }}
+              >
+                Clear
+              </button>
+
+              <a
+                href="/exercises/new?return=/log"
+                style={{
+                  padding: "10px 14px",
+                  border: "1px solid #ddd",
+                  borderRadius: 8,
+                  textDecoration: "none",
+                  color: "inherit",
+                }}
+              >
+                New strength exercise
+              </a>
+            </div>
           </div>
 
           {msg && <div style={{ marginBottom: 14, color: "#b00020" }}>{msg}</div>}
