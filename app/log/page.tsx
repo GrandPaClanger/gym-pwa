@@ -30,8 +30,7 @@ const rowKey = (r: PlanRow) => `${r.plan_date}-${r.sequence_no}`;
 const slotKey = (plan_date: string, sequence_no: number) => `${plan_date}-${sequence_no}`;
 const todayIso = () => new Date().toISOString().slice(0, 10);
 
-// keep UI snappy if you ever end up with thousands of exercises
-const ADD_EXERCISE_MAX_OPTIONS = 500;
+// Add exercise: show the full list by default, and narrow it as you type.
 
 export default function LogPage() {
   const [isAuthed, setIsAuthed] = useState(false);
@@ -143,20 +142,16 @@ export default function LogPage() {
     void loadToday();
   }, [isAuthed]);
 
-  // Stable session start stored in localStorage
+  // Session start: only restore if a session was explicitly started.
+  // (Prevents "phantom" sessions being created just by opening /log.)
   useEffect(() => {
     if (!isAuthed) return;
 
     const key = `gym.session_start.${todayIso()}`;
     const existing = window.localStorage.getItem(key);
-    if (existing) {
-      setSessionStart(existing);
-      return;
-    }
 
-    const fresh = new Date().toISOString();
-    window.localStorage.setItem(key, fresh);
-    setSessionStart(fresh);
+    if (existing) setSessionStart(existing);
+    else setSessionStart("");
   }, [isAuthed]);
 
   const newSession = () => {
@@ -380,6 +375,18 @@ export default function LogPage() {
       return;
     }
 
+    // reps validation (prevents fat-finger saves like 1 rep)
+    for (const r of rows) {
+      if (r.exercise_type !== 1) continue;
+      const k = rowKey(r);
+      const repRaw = reps[k] === "" || reps[k] == null ? r.target_reps ?? 10 : Number(reps[k]);
+      const rep = clampReps(repRaw);
+      if (repRaw < REP_MIN || repRaw > REP_MAX) {
+        setMsg(`Reps out of range for "${r.exercise_name}" (must be ${REP_MIN}-${REP_MAX}).`);
+        return;
+      }
+    }
+
     const { error } = await supabase.rpc("log_session_json", {
       p_session_start: sessionStart,
       p_duration_min: durationMin,
@@ -389,16 +396,12 @@ export default function LogPage() {
     setMsg(error ? error.message : "Session saved.");
   };
 
-  // ✅ Filtered list for Add exercise…
+  // ✅ Full list by default; narrows as you type.
   const filteredAddExercises = useMemo(() => {
     const q = addExerciseQuery.trim().toLowerCase();
     if (!q) return exerciseList;
     return exerciseList.filter((e) => e.canonical_name.toLowerCase().includes(q));
   }, [exerciseList, addExerciseQuery]);
-
-  const addExerciseOptions = useMemo(() => {
-    return filteredAddExercises.slice(0, ADD_EXERCISE_MAX_OPTIONS);
-  }, [filteredAddExercises]);
 
   return (
     <main style={{ padding: 20, maxWidth: 1100, margin: "0 auto", fontFamily: "system-ui, sans-serif" }}>
@@ -447,7 +450,15 @@ export default function LogPage() {
               />
             </label>
 
-            <button onClick={saveSession} style={{ padding: "10px 14px" }}>
+            <button
+              onClick={saveSession}
+              disabled={!sessionStart}
+              style={{
+                padding: "10px 14px",
+                opacity: sessionStart ? 1 : 0.5,
+                cursor: sessionStart ? "pointer" : "not-allowed",
+              }}
+            >
               Save session
             </button>
           </div>
@@ -469,18 +480,13 @@ export default function LogPage() {
                 style={{ padding: 10, minWidth: 320 }}
               >
                 <option value="">Select exercise…</option>
-                {addExerciseOptions.map((e) => (
+                {filteredAddExercises.map((e) => (
                   <option key={e.exercise_id} value={e.exercise_id}>
                     {e.canonical_name}
                   </option>
                 ))}
               </select>
 
-              {filteredAddExercises.length > ADD_EXERCISE_MAX_OPTIONS && (
-                <div style={{ color: "#777", fontSize: 12 }}>
-                  Showing first {ADD_EXERCISE_MAX_OPTIONS} matches — keep typing to narrow.
-                </div>
-              )}
             </div>
 
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginTop: 34 }}>
