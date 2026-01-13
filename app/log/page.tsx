@@ -387,7 +387,6 @@ export default function LogPage() {
       p_session_start: ss,
       p_duration_min: durationMin,
       p_plan_date: planDate,
-      p_rows: payload,
     });
 
     if (error) {
