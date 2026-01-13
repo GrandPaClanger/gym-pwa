@@ -8,11 +8,12 @@ type PlanRow = {
   plan_date: string;
   sequence_no: number;
   exercise_name: string;
-  exercise_type: number; // 1 strength, 2 cardio
+  exercise_type: number;
   target_sets: number | null;
   target_reps: number | null;
   target_duration_sec: number | null;
   suggested_load_kg: number | null;
+  target_load_kg?: number | null;
 };
 
 type Exercise = {
