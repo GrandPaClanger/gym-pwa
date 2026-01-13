@@ -8,11 +8,12 @@ type PlanRow = {
   plan_date: string;
   sequence_no: number;
   exercise_name: string;
-  exercise_type: number;
+  exercise_type: number; // 1 strength, 2 cardio
   target_sets: number | null;
   target_reps: number | null;
   target_duration_sec: number | null;
   suggested_load_kg: number | null;
+  // optional (some views include it)
   target_load_kg?: number | null;
 };
 
@@ -27,6 +28,15 @@ type RowPayload =
   | { sequence_no: number; name: string; duration_sec: number }
   | { sequence_no: number; name: string; sets: StrengthSet[] };
 
+type PlanItemPatch = {
+  exercise_id?: number;
+  target_sets?: number;
+  target_reps?: number;
+  target_load_kg?: number | null;
+  target_duration_sec?: number | null;
+  notes?: string | null;
+};
+
 const REP_MIN = 8;
 const REP_MAX = 20;
 const ADD_EXERCISE_MAX_OPTIONS = 500;
@@ -38,35 +48,36 @@ const clampReps = (v: number) => Math.max(REP_MIN, Math.min(REP_MAX, Math.round(
 const isValidReps = (v: number) => Number.isFinite(v) && v >= REP_MIN && v <= REP_MAX;
 
 export default function LogPage() {
-  // auth (magic link)
+  // auth
   const [email, setEmail] = useState("");
   const [isAuthed, setIsAuthed] = useState(false);
 
   // data
   const [rows, setRows] = useState<PlanRow[]>([]);
   const [exerciseList, setExerciseList] = useState<Exercise[]>([]);
+  const [planId, setPlanId] = useState<number | null>(null);
 
-  // UI + state
+  // UI
   const [msg, setMsg] = useState<string>("");
 
-  // ✅ Stable session start (does NOT change on every save)
+  // stable session start (per day)
   const [sessionStart, setSessionStart] = useState<string>("");
   const [sessionDurationMin, setSessionDurationMin] = useState<number>(60);
 
-  // debounced timers per slot
+  // debounced timers per plan row
   const autosaveTimers = useRef<Record<string, any>>({});
 
   // local edits keyed by plan-date + sequence
   const [sets, setSets] = useState<Record<string, number | "">>({});
   const [reps, setReps] = useState<Record<string, number | "">>({});
   const [loads, setLoads] = useState<Record<string, number | "">>({});
-  const [durationsMin, setDurationsMin] = useState<Record<string, number | "">>({}); // cardio minutes (UI)
+  const [durationsMin, setDurationsMin] = useState<Record<string, number | "">>({}); // cardio minutes UI
 
   // add exercise
   const [addExerciseId, setAddExerciseId] = useState<number | "">("");
   const [addExerciseQuery, setAddExerciseQuery] = useState<string>("");
 
-  // swap (controlled, so it doesn't default to first item)
+  // swap
   const [swapPick, setSwapPick] = useState<Record<string, number | "">>({});
 
   const signInMagicLink = async () => {
@@ -75,7 +86,6 @@ export default function LogPage() {
     setMsg(error ? error.message : "Check your email for the magic link.");
   };
 
-  // Session-start key should be stable for the day
   const sessionKeyForToday = () => `gym.session_start.${todayIso()}`;
 
   const ensureSessionStart = () => {
@@ -113,13 +123,53 @@ export default function LogPage() {
     setExerciseList((data as Exercise[]) ?? []);
   };
 
+  const getPersonId = async (): Promise<number | null> => {
+    if (rows.length > 0) return rows[0].person_id;
+    const { data, error } = await supabase.rpc("my_person_id");
+    if (error) return null;
+    const n = Number(data);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  const loadPlanIdForToday = async (): Promise<number | null> => {
+    const pid = await getPersonId();
+    if (!pid) return null;
+
+    const { data, error } = await supabase
+      .from("workout_plan")
+      .select("plan_id")
+      .eq("person_id", pid)
+      .eq("plan_date", todayIso())
+      .order("plan_id", { ascending: false })
+      .limit(1);
+
+    if (error) return null;
+    const id = (data as any[])?.[0]?.plan_id;
+    const n = Number(id);
+    if (!Number.isFinite(n)) return null;
+    setPlanId(n);
+    return n;
+  };
+
+  const requirePlanId = async (): Promise<number | null> => {
+    if (planId) return planId;
+    return await loadPlanIdForToday();
+  };
+
+  const getRowDefaultLoad = (r: PlanRow) => {
+    const tl = (r as any).target_load_kg;
+    if (tl !== undefined && tl !== null) return Number(tl);
+    return r.suggested_load_kg ?? null;
+  };
+
   const loadToday = async () => {
     setMsg("");
     const planDate = todayIso();
 
+    // Select * to avoid schema-cache/column mismatch as this view evolves.
     const { data, error } = await supabase
       .from("v_plan_today_edit")
-      .select("person_id, plan_date, sequence_no, exercise_name, exercise_type, target_sets, target_reps, target_duration_sec, suggested_load_kg")
+      .select("*")
       .eq("plan_date", planDate)
       .order("sequence_no", { ascending: true });
 
@@ -131,7 +181,10 @@ export default function LogPage() {
     const r = (data as PlanRow[]) ?? [];
     setRows(r);
 
-    // seed UI fields from plan values (so they show even if empty local edits)
+    // also load plan_id (needed for updates/inserts/deletes)
+    void loadPlanIdForToday();
+
+    // seed UI fields from plan values
     const nextSets: Record<string, number | ""> = {};
     const nextReps: Record<string, number | ""> = {};
     const nextLoads: Record<string, number | ""> = {};
@@ -143,7 +196,8 @@ export default function LogPage() {
       if (row.exercise_type === 1) {
         nextSets[k] = row.target_sets ?? 3;
         nextReps[k] = row.target_reps ?? 10;
-        nextLoads[k] = row.suggested_load_kg ?? 0;
+        const d = getRowDefaultLoad(row);
+        nextLoads[k] = d ?? "";
       } else {
         const mins = row.target_duration_sec != null ? Math.round(row.target_duration_sec / 60) : 0;
         nextDurMin[k] = mins;
@@ -161,18 +215,24 @@ export default function LogPage() {
     const p_start_date = todayIso();
     const p_days = 1;
 
-    // you created public.generate_plan(p_days int, p_start_date date) wrapper
-    const { error } = await supabase.rpc("generate_plan", { p_days, p_start_date });
+    // wrapper: public.generate_plan(p_days int, p_start_date date)
+    const { data, error } = await supabase.rpc("generate_plan", { p_days, p_start_date });
     if (error) {
       setMsg(error.message);
       return;
+    }
+
+    // sometimes the function returns a plan_id; use it if present
+    if (data != null) {
+      const n = Number(data);
+      if (Number.isFinite(n)) setPlanId(n);
     }
 
     await loadToday();
     setMsg("Plan refreshed.");
   };
 
-  const queueAutosave = (sequence_no: number, patch: Partial<PlanRow>) => {
+  const queueAutosave = (sequence_no: number, patch: PlanItemPatch) => {
     const planDate = todayIso();
     const k = rowKey(planDate, sequence_no);
 
@@ -180,10 +240,17 @@ export default function LogPage() {
 
     autosaveTimers.current[k] = setTimeout(async () => {
       autosaveTimers.current[k] = null;
+
+      const pid = await requirePlanId();
+      if (!pid) {
+        setMsg("No plan loaded. Click Refresh plan.");
+        return;
+      }
+
       const { error } = await supabase
         .from("workout_plan_item")
         .update(patch)
-        .eq("plan_date", planDate)
+        .eq("plan_id", pid)
         .eq("sequence_no", sequence_no);
 
       if (error) setMsg(error.message);
@@ -194,10 +261,11 @@ export default function LogPage() {
     setMsg("");
     if (addExerciseId === "") return;
 
-    const planDate = todayIso();
-
-    const maxSeq = rows.reduce((m, r) => Math.max(m, r.sequence_no), 0);
-    const newSeq = maxSeq + 10;
+    const pid = await requirePlanId();
+    if (!pid) {
+      setMsg("No plan loaded. Click Refresh plan.");
+      return;
+    }
 
     const ex = exerciseList.find((x) => x.exercise_id === Number(addExerciseId));
     if (!ex) {
@@ -205,24 +273,26 @@ export default function LogPage() {
       return;
     }
 
-    // defaults
-    const newItem: any = {
-      plan_date: planDate,
+    const maxSeq = rows.reduce((m, r) => Math.max(m, r.sequence_no), 0);
+    const newSeq = maxSeq + 10;
+
+    // IMPORTANT: workout_plan_item does NOT have exercise_name/exercise_type/plan_date.
+    // It needs plan_id + sequence_no + exercise_id, plus NOT NULL targets.
+    const insertRow: any = {
+      plan_id: pid,
       sequence_no: newSeq,
       exercise_id: ex.exercise_id,
-      exercise_name: ex.canonical_name,
-      exercise_type: ex.exercise_type,
+      target_sets: 3,
+      target_reps: 10,
+      target_load_kg: null,
+      target_duration_sec: null,
     };
 
-    if (ex.exercise_type === 1) {
-      newItem.target_sets = 3;
-      newItem.target_reps = 10;
-      newItem.target_load_kg = null;
-    } else {
-      newItem.target_duration_sec = 8 * 60;
+    if (ex.exercise_type === 2) {
+      insertRow.target_duration_sec = 8 * 60; // default 8 min
     }
 
-    const { error } = await supabase.from("workout_plan_item").insert(newItem);
+    const { error } = await supabase.from("workout_plan_item").insert(insertRow);
     if (error) {
       setMsg(error.message);
       return;
@@ -235,9 +305,18 @@ export default function LogPage() {
 
   const removeExercise = async (sequence_no: number) => {
     setMsg("");
-    const planDate = todayIso();
+    const pid = await requirePlanId();
+    if (!pid) {
+      setMsg("No plan loaded. Click Refresh plan.");
+      return;
+    }
 
-    const { error } = await supabase.from("workout_plan_item").delete().eq("plan_date", planDate).eq("sequence_no", sequence_no);
+    const { error } = await supabase
+      .from("workout_plan_item")
+      .delete()
+      .eq("plan_id", pid)
+      .eq("sequence_no", sequence_no);
+
     if (error) {
       setMsg(error.message);
       return;
@@ -249,8 +328,11 @@ export default function LogPage() {
 
   const replaceExercise = async (sequence_no: number, newExerciseId: number) => {
     setMsg("");
-    const planDate = todayIso();
-    const sk = rowKey(planDate, sequence_no);
+    const pid = await requirePlanId();
+    if (!pid) {
+      setMsg("No plan loaded. Click Refresh plan.");
+      return;
+    }
 
     const ex = exerciseList.find((x) => x.exercise_id === newExerciseId);
     if (!ex) {
@@ -258,29 +340,19 @@ export default function LogPage() {
       return;
     }
 
-    const patch: any = {
+    // Keep NOT NULL columns valid. For cardio rows, sets/reps can stay defaulted.
+    const patch: PlanItemPatch = {
       exercise_id: ex.exercise_id,
-      exercise_name: ex.canonical_name,
-      exercise_type: ex.exercise_type,
+      target_sets: 3,
+      target_reps: 10,
+      target_load_kg: null,
+      target_duration_sec: ex.exercise_type === 2 ? 8 * 60 : null,
     };
-
-    // reset targets to defaults for that type (prevents NOT NULL issues like target_sets)
-    if (ex.exercise_type === 1) {
-      patch.target_sets = 3;
-      patch.target_reps = 10;
-      patch.target_load_kg = null;
-      patch.target_duration_sec = null;
-    } else {
-      patch.target_duration_sec = 8 * 60;
-      patch.target_sets = null;
-      patch.target_reps = null;
-      patch.target_load_kg = null;
-    }
 
     const { error } = await supabase
       .from("workout_plan_item")
       .update(patch)
-      .eq("plan_date", planDate)
+      .eq("plan_id", pid)
       .eq("sequence_no", sequence_no);
 
     if (error) {
@@ -289,6 +361,7 @@ export default function LogPage() {
     }
 
     // clear local edits for this slot (otherwise old values stick)
+    const sk = rowKey(todayIso(), sequence_no);
     setLoads((p) => {
       const n = { ...p };
       delete n[sk];
@@ -322,7 +395,10 @@ export default function LogPage() {
       const k = rowKey(planDate, r.sequence_no);
 
       if (r.exercise_type === 2) {
-        const mins = durationsMin[k] === "" || durationsMin[k] == null ? Math.round((r.target_duration_sec ?? 0) / 60) : Number(durationsMin[k]);
+        const mins =
+          durationsMin[k] === "" || durationsMin[k] == null
+            ? Math.round((r.target_duration_sec ?? 0) / 60)
+            : Number(durationsMin[k]);
         out.push({
           sequence_no: r.sequence_no,
           name: r.exercise_name,
@@ -334,18 +410,15 @@ export default function LogPage() {
       const setCount = sets[k] === "" || sets[k] == null ? r.target_sets ?? 3 : Number(sets[k]);
       const repRaw = reps[k] === "" || reps[k] == null ? r.target_reps ?? 10 : Number(reps[k]);
       const rep = clampReps(repRaw);
-      const load = loads[k] === "" || loads[k] == null ? r.suggested_load_kg ?? null : Number(loads[k]);
+      const loadRaw = loads[k] === "" || loads[k] == null ? getRowDefaultLoad(r) : Number(loads[k]);
+      const load = loadRaw == null || Number.isNaN(loadRaw as any) ? null : Number(loadRaw);
 
       const setsArr: StrengthSet[] = [];
       for (let i = 0; i < Math.max(1, Math.round(setCount)); i++) {
-        setsArr.push({ reps: rep, load_kg: load == null || Number.isNaN(load) ? null : load });
+        setsArr.push({ reps: rep, load_kg: load });
       }
 
-      out.push({
-        sequence_no: r.sequence_no,
-        name: r.exercise_name,
-        sets: setsArr,
-      });
+      out.push({ sequence_no: r.sequence_no, name: r.exercise_name, sets: setsArr });
     }
 
     return out;
@@ -354,11 +427,11 @@ export default function LogPage() {
   const saveSession = async () => {
     setMsg("");
 
-    // Ensure we always have a stable session_start
+    // Always have a stable session_start
     let ss = sessionStart;
     if (!ss) ss = ensureSessionStart();
 
-    // Reps validation (strength only)
+    // reps validation (strength only)
     for (const r of rows) {
       if (r.exercise_type !== 1) continue;
       const k = rowKey(todayIso(), r.sequence_no);
@@ -369,7 +442,7 @@ export default function LogPage() {
       }
     }
 
-    // ✅ match your DB: p_session_start, p_duration_min, p_rows
+    // DB signature: (p_session_start timestamptz, p_duration_min smallint, p_rows jsonb)
     const { error } = await supabase.rpc("log_session_json", {
       p_session_start: ss,
       p_duration_min: sessionDurationMin,
@@ -418,7 +491,7 @@ export default function LogPage() {
 
   const swapOptions = useMemo(() => exerciseList.slice(0, 1000), [exerciseList]);
 
-  // Styles (simple + mobile friendly)
+  // Styles
   const th: React.CSSProperties = { textAlign: "left", padding: "10px 8px", borderBottom: "1px solid #333" };
   const td: React.CSSProperties = { padding: "10px 8px", borderBottom: "1px solid #222", verticalAlign: "top" };
 
@@ -447,7 +520,8 @@ export default function LogPage() {
     <main style={{ padding: 20, maxWidth: 1100, margin: "0 auto" }}>
       <h1 style={{ marginBottom: 8 }}>Log session</h1>
       <div style={{ color: "#666", marginBottom: 12 }}>
-        Plan date: <b>{todayIso()}</b> · Session start: <b>{sessionStart || "(not set)"}</b>
+        Plan date: <b>{todayIso()}</b> · Plan ID: <b>{planId ?? "(unknown)"}</b> · Session start:{" "}
+        <b>{sessionStart || "(not set)"}</b>
       </div>
 
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginBottom: 14 }}>
@@ -486,7 +560,11 @@ export default function LogPage() {
           style={{ padding: 10, minWidth: 320 }}
         />
 
-        <select value={addExerciseId} onChange={(e) => setAddExerciseId(e.target.value === "" ? "" : Number(e.target.value))} style={{ padding: 10, minWidth: 320 }}>
+        <select
+          value={addExerciseId}
+          onChange={(e) => setAddExerciseId(e.target.value === "" ? "" : Number(e.target.value))}
+          style={{ padding: 10, minWidth: 320 }}
+        >
           <option value="">Select exercise…</option>
           {addExerciseOptions.map((e) => (
             <option key={e.exercise_id} value={e.exercise_id}>
@@ -534,11 +612,11 @@ export default function LogPage() {
             {rows.map((r) => {
               const planDate = todayIso();
               const k = rowKey(planDate, r.sequence_no);
-              const sk = k;
 
               const showSets = sets[k] === "" || sets[k] == null ? r.target_sets ?? 3 : Number(sets[k]);
               const showReps = reps[k] === "" || reps[k] == null ? r.target_reps ?? 10 : Number(reps[k]);
-              const showLoad = loads[k] === "" || loads[k] == null ? r.suggested_load_kg ?? "" : loads[k];
+              const defaultLoad = getRowDefaultLoad(r);
+              const showLoad = loads[k] === "" || loads[k] == null ? (defaultLoad ?? "") : loads[k];
 
               const targetMin = r.target_duration_sec != null ? Math.round(r.target_duration_sec / 60) : 0;
               const showMin = durationsMin[k] === "" || durationsMin[k] == null ? targetMin : Number(durationsMin[k]);
@@ -548,6 +626,7 @@ export default function LogPage() {
                   <td style={td}>{r.sequence_no}</td>
                   <td style={td}>
                     <b>{r.exercise_name}</b>
+
                     {r.exercise_type === 1 && (
                       <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap" }}>
                         <label>
@@ -574,7 +653,7 @@ export default function LogPage() {
                             onChange={(e) => {
                               const v = e.target.value === "" ? "" : Number(e.target.value);
                               setLoads((prev) => ({ ...prev, [k]: v }));
-                              if (v !== "") queueAutosave(r.sequence_no, { target_load_kg: v as any });
+                              if (v !== "") queueAutosave(r.sequence_no, { target_load_kg: v });
                             }}
                             style={{ width: 110, marginLeft: 6, padding: 6 }}
                           />
@@ -588,7 +667,7 @@ export default function LogPage() {
                             onChange={(e) => {
                               const v = e.target.value === "" ? "" : Number(e.target.value);
                               setSets((prev) => ({ ...prev, [k]: v }));
-                              if (v !== "") queueAutosave(r.sequence_no, { target_sets: v as any });
+                              if (v !== "") queueAutosave(r.sequence_no, { target_sets: Math.max(1, Math.round(v)) });
                             }}
                             style={{ width: 70, marginLeft: 6, padding: 6 }}
                           />
@@ -606,10 +685,7 @@ export default function LogPage() {
                           onChange={(e) => {
                             const v = e.target.value === "" ? "" : Number(e.target.value);
                             setDurationsMin((prev) => ({ ...prev, [k]: v }));
-                            if (v !== "")
-                              queueAutosave(r.sequence_no, {
-                                target_duration_sec: Math.max(0, Math.round(v * 60)),
-                              });
+                            if (v !== "") queueAutosave(r.sequence_no, { target_duration_sec: Math.max(0, Math.round(v * 60)) });
                           }}
                           style={{ width: 90, marginLeft: 6, padding: 6 }}
                         />
@@ -620,14 +696,14 @@ export default function LogPage() {
                   <td style={td}>
                     <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
                       <select
-                        value={swapPick[sk] ?? ""}
+                        value={swapPick[k] ?? ""}
                         onChange={(e) => {
                           const v = e.target.value;
                           if (!v) return;
                           const id = Number(v);
-                          setSwapPick((p) => ({ ...p, [sk]: id }));
+                          setSwapPick((p) => ({ ...p, [k]: id }));
                           void replaceExercise(r.sequence_no, id);
-                          setSwapPick((p) => ({ ...p, [sk]: "" }));
+                          setSwapPick((p) => ({ ...p, [k]: "" }));
                         }}
                         style={{ padding: 10, minWidth: 220 }}
                       >
@@ -647,6 +723,7 @@ export default function LogPage() {
                 </tr>
               );
             })}
+
             {rows.length === 0 && (
               <tr>
                 <td style={td} colSpan={3}>
