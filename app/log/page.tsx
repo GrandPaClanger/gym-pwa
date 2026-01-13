@@ -13,7 +13,9 @@ type PlanRow = {
   target_sets: number | null;
   target_reps: number | null;
   target_duration_sec: number | null;
-  suggested_load_kg: number | null;
+  // some views expose one or both of these
+  suggested_load_kg?: number | null;
+  target_load_kg?: number | null;
 };
 
 type Exercise = {
@@ -31,6 +33,7 @@ type LastVals = {
 };
 
 type StrengthSet = { reps: number; load_kg: number | null };
+
 type RowPayload =
   | { sequence_no: number; name: string; duration_sec: number }
   | { sequence_no: number; name: string; sets: StrengthSet[] };
@@ -48,6 +51,12 @@ export default function LogPage() {
 
   const [rows, setRows] = useState<PlanRow[]>([]);
   const [exerciseList, setExerciseList] = useState<Exercise[]>([]);
+
+  // auth (optional but helps with RLS)
+  const [isAuthed, setIsAuthed] = useState(false);
+  const [email, setEmail] = useState("");
+
+  // Add exercise UI
   const [addExerciseQuery, setAddExerciseQuery] = useState("");
   const [addExerciseId, setAddExerciseId] = useState<number | "">("");
 
@@ -57,18 +66,76 @@ export default function LogPage() {
   const [loads, setLoads] = useState<Record<string, number | "" | null>>({});
   const [durSec, setDurSec] = useState<Record<string, number | "">>({});
 
-  // row-level reps validation state (so cardio doesn’t trigger it)
+  // row-level reps validation state (only strength)
   const [repErr, setRepErr] = useState<Record<string, string>>({});
 
-  // stable session_start
+  // duration stored on session
+  const [durationMin, setDurationMin] = useState<number>(60);
+
+  // stable session_start (refresh-safe)
   const SESSION_KEY = `gym.session_start.${todayIso()}`;
+  const LEGACY_SESSION_KEYS = ["gym_session_start_iso", "gym_session_start"];
   const [sessionStart, setSessionStart] = useState<string>("");
 
   // autosave debounce
-  const timers = useRef<Record<string, any>>({});
+  const saveTimersRef = useRef<Record<string, any>>({});
 
-  const clearMsgSoon = () => {
-    // don’t fight user; only clear on next interaction
+  const filteredAddExercises = useMemo(() => {
+    const q = addExerciseQuery.trim().toLowerCase();
+    if (!q) return exerciseList;
+    return exerciseList.filter((e) => e.canonical_name.toLowerCase().includes(q));
+  }, [addExerciseQuery, exerciseList]);
+
+  const getPlanId = async (): Promise<number | null> => {
+    const plan_date = todayIso();
+
+    // v_today_plan_app usually has plan rows; we just need plan_id from workout_plan
+    // If you have a person_id-based plan table, adjust here.
+    const { data, error } = await supabase
+      .from("workout_plan")
+      .select("plan_id")
+      .eq("plan_date", plan_date)
+      .order("plan_id", { ascending: false })
+      .limit(1);
+
+    if (error) {
+      setMsg(error.message);
+      return null;
+    }
+
+    return data?.[0]?.plan_id ?? null;
+  };
+
+  const fetchLastVals = async (exercise_id: number): Promise<LastVals | null> => {
+    const { data, error } = await supabase
+      .from("v_last_exercise_values")
+      .select("exercise_id, last_sets, last_reps, last_load_kg, last_session_start")
+      .eq("exercise_id", exercise_id)
+      .maybeSingle();
+
+    if (error) return null;
+    return (data as LastVals) ?? null;
+  };
+
+  const queueAutosave = (sequence_no: number, patch: Record<string, any>) => {
+    void (async () => {
+      const plan_id = await getPlanId();
+      if (!plan_id) return;
+
+      const key = `${plan_id}-${sequence_no}`;
+
+      if (saveTimersRef.current[key]) clearTimeout(saveTimersRef.current[key]);
+
+      saveTimersRef.current[key] = setTimeout(async () => {
+        const { error } = await supabase
+          .from("workout_plan_item")
+          .update(patch)
+          .eq("plan_id", plan_id)
+          .eq("sequence_no", sequence_no);
+
+        if (error) setMsg(error.message);
+      }, 500);
+    })();
   };
 
   const loadAll = async () => {
@@ -95,95 +162,44 @@ export default function LogPage() {
     setRows((planRes.data ?? []) as PlanRow[]);
     setExerciseList((exRes.data ?? []) as Exercise[]);
 
-    // session_start only exists once user started/continued a session
-    const existing = window.localStorage.getItem(SESSION_KEY);
-    setSessionStart(existing || "");
+    // session_start: read current key OR legacy keys, then migrate to current key
+    const existing =
+      window.localStorage.getItem(SESSION_KEY) ||
+      LEGACY_SESSION_KEYS.map((k) => window.localStorage.getItem(k)).find(Boolean) ||
+      "";
+
+    if (existing) window.localStorage.setItem(SESSION_KEY, existing);
+    setSessionStart(existing);
 
     setLoading(false);
   };
 
+  // auth session
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    void (async () => {
+      const { data } = await supabase.auth.getSession();
+      setIsAuthed(!!data.session);
+    })();
+
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
+      setIsAuthed(!!session);
+    });
+
+    return () => {
+      sub.subscription.unsubscribe();
+    };
+  }, []);
+
+  // initial load
   useEffect(() => {
     if (typeof window === "undefined") return;
     void loadAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const getPlanId = async (): Promise<number | null> => {
-    const plan_date = todayIso();
-    const { data, error } = await supabase
-      .from("workout_plan")
-      .select("plan_id")
-      .eq("plan_date", plan_date)
-      .maybeSingle();
-
-    if (error) {
-      setMsg(error.message);
-      return null;
-    }
-    return data?.plan_id ?? null;
-  };
-
-  const queueAutosave = (sequence_no: number, patch: Record<string, any>) => {
-    void (async () => {
-      const plan_id = await getPlanId();
-      if (!plan_id) return;
-
-      const k = `${plan_id}-${sequence_no}`;
-      if (timers.current[k]) clearTimeout(timers.current[k]);
-
-      timers.current[k] = setTimeout(async () => {
-        const { error } = await supabase
-          .from("workout_plan_item")
-          .update(patch)
-          .eq("plan_id", plan_id)
-          .eq("sequence_no", sequence_no);
-
-        if (error) setMsg(error.message);
-      }, 500);
-    })();
-  };
-
-  const startNewSession = () => {
-    const iso = new Date().toISOString();
-    window.localStorage.setItem(SESSION_KEY, iso);
-    setSessionStart(iso);
-    setMsg("New session started.");
-  };
-
-  const refreshPlan = async () => {
-    setMsg("");
-    const plan_date = todayIso();
-
-    // keep your original authoritative function call
-    const { error } = await supabase.rpc("generate_plan", {
-      p_plan_date: plan_date,
-      p_cooldown_days: 10,
-    });
-
-    if (error) {
-      setMsg(error.message);
-      return;
-    }
-
-    await loadAll();
-    setMsg("Plan refreshed.");
-  };
-
-  const fetchLastVals = async (exercise_id: number): Promise<LastVals | null> => {
-    const { data, error } = await supabase
-      .from("v_last_exercise_values")
-      .select("exercise_id,last_sets,last_reps,last_load_kg,last_session_start")
-      .eq("exercise_id", exercise_id)
-      .maybeSingle();
-
-    if (error) {
-      setMsg(error.message);
-      return null;
-    }
-    return (data ?? null) as LastVals | null;
-  };
-
-  // Init UI defaults from plan, but if plan fields are null, fall back to last values (no DB write)
+  // when plan rows arrive, ensure local defaults exist (and pull last vals if plan targets are missing)
   useEffect(() => {
     if (!rows.length) return;
 
@@ -203,11 +219,20 @@ export default function LogPage() {
 
         const lv = r.exercise_id ? await fetchLastVals(r.exercise_id) : null;
 
-        nextSets[k] = r.target_sets ?? lv?.last_sets ?? 3;
-        nextReps[k] = r.target_reps ?? lv?.last_reps ?? 10;
-        nextLoads[k] = r.suggested_load_kg ?? lv?.last_load_kg ?? null;
+        const planSets = r.target_sets ?? undefined;
+        const planReps = r.target_reps ?? undefined;
+        const planLoad = (r.target_load_kg ?? r.suggested_load_kg) ?? undefined;
+
+        const lastReps = lv?.last_reps ?? null;
+        const safePlanReps = typeof planReps === "number" && isValidReps(planReps) ? planReps : null;
+        const safeLastReps = typeof lastReps === "number" && isValidReps(lastReps) ? lastReps : null;
+
+        nextSets[k] = planSets ?? lv?.last_sets ?? 3;
+        nextReps[k] = safePlanReps ?? safeLastReps ?? 10;
+        nextLoads[k] = planLoad ?? lv?.last_load_kg ?? null;
       }
 
+      // only apply where user hasn't edited yet
       setSets((p) => ({ ...nextSets, ...p }));
       setReps((p) => ({ ...nextReps, ...p }));
       setLoads((p) => ({ ...nextLoads, ...p }));
@@ -216,11 +241,188 @@ export default function LogPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rows]);
 
-  const filteredAddExercises = useMemo(() => {
-    const q = addExerciseQuery.trim().toLowerCase();
-    if (!q) return exerciseList;
-    return exerciseList.filter((e) => e.canonical_name.toLowerCase().includes(q));
-  }, [exerciseList, addExerciseQuery]);
+  const signInMagicLink = async () => {
+    setMsg("");
+    if (!email.trim()) {
+      setMsg("Enter an email first.");
+      return;
+    }
+
+    const { error } = await supabase.auth.signInWithOtp({
+      email: email.trim(),
+      options: { emailRedirectTo: `${window.location.origin}/auth/callback` },
+    });
+
+    if (error) setMsg(error.message);
+    else setMsg("Magic link sent. Check your email.");
+  };
+
+  const startNewSession = () => {
+    const ss = new Date().toISOString();
+    window.localStorage.setItem(SESSION_KEY, ss);
+    setSessionStart(ss);
+    setMsg("New session started.");
+  };
+
+  const refreshPlan = async () => {
+    setMsg("");
+    const plan_date = todayIso();
+
+    // you have a wrapper function public.generate_plan(p_days int, p_start_date date)
+    // but for today it's best to call generate_plan_days directly if you want.
+    // We'll just regen today via generate_plan_days( today, 1, 10 ) if it exists,
+    // otherwise call generate_plan(p_plan_date,...).
+    const { error } = await supabase.rpc("generate_plan", {
+      p_days: 1,
+      p_start_date: plan_date,
+    });
+
+    if (error) {
+      // fallback to older signature
+      const fb = await supabase.rpc("generate_plan", {
+        p_plan_date: plan_date,
+        p_cooldown_days: 10,
+      });
+      if (fb.error) setMsg(fb.error.message);
+    }
+
+    await loadAll();
+  };
+
+  const replaceExercise = async (sequence_no: number, new_exercise_id: number) => {
+    setMsg("");
+
+    const plan_id = await getPlanId();
+    if (!plan_id) return;
+
+    const plan_date = todayIso();
+    const k = rowKey(plan_date, sequence_no);
+
+    const newEx = exerciseList.find((e) => e.exercise_id === new_exercise_id);
+    if (!newEx) return;
+
+    // build a safe patch that satisfies NOT NULL constraints
+    if (newEx.exercise_type === 2) {
+      const duration = Number(durSec[k] === "" || durSec[k] == null ? 2400 : durSec[k]);
+      const patch = {
+        exercise_id: new_exercise_id,
+        target_sets: 0,
+        target_reps: 0,
+        target_load_kg: null,
+        target_duration_sec: Number.isFinite(duration) ? duration : 2400,
+      };
+
+      const { error } = await supabase
+        .from("workout_plan_item")
+        .update(patch)
+        .eq("plan_id", plan_id)
+        .eq("sequence_no", sequence_no);
+
+      if (error) {
+        setMsg(error.message);
+        return;
+      }
+
+      // clear local strength edits for this slot
+      setLoads((p) => {
+        const n = { ...p };
+        delete n[k];
+        return n;
+      });
+      setReps((p) => {
+        const n = { ...p };
+        delete n[k];
+        return n;
+      });
+      setSets((p) => {
+        const n = { ...p };
+        delete n[k];
+        return n;
+      });
+      setRepErr((p) => {
+        const n = { ...p };
+        delete n[k];
+        return n;
+      });
+
+      setDurSec((p) => ({ ...p, [k]: patch.target_duration_sec }));
+      await loadAll();
+      return;
+    }
+
+    // strength
+    const lv = await fetchLastVals(new_exercise_id);
+    const nextSets = lv?.last_sets ?? 3;
+
+    const lr = lv?.last_reps ?? 10;
+    const nextReps = isValidReps(lr) ? lr : 10;
+
+    const nextLoad = lv?.last_load_kg ?? null;
+
+    const patch = {
+      exercise_id: new_exercise_id,
+      target_sets: nextSets,
+      target_reps: nextReps,
+      target_load_kg: nextLoad,
+      target_duration_sec: 0,
+    };
+
+    const { error } = await supabase
+      .from("workout_plan_item")
+      .update(patch)
+      .eq("plan_id", plan_id)
+      .eq("sequence_no", sequence_no);
+
+    if (error) {
+      setMsg(error.message);
+      return;
+    }
+
+    // clear local edits so we don't keep old exercise's values
+    setLoads((p) => {
+      const n = { ...p };
+      delete n[k];
+      return n;
+    });
+    setReps((p) => {
+      const n = { ...p };
+      delete n[k];
+      return n;
+    });
+    setSets((p) => {
+      const n = { ...p };
+      delete n[k];
+      return n;
+    });
+    setRepErr((p) => {
+      const n = { ...p };
+      delete n[k];
+      return n;
+    });
+
+    // apply immediately
+    setSets((p) => ({ ...p, [k]: nextSets }));
+    setReps((p) => ({ ...p, [k]: nextReps }));
+    setLoads((p) => ({ ...p, [k]: nextLoad ?? "" }));
+
+    await loadAll();
+  };
+
+  const removeExercise = async (sequence_no: number) => {
+    setMsg("");
+
+    const plan_id = await getPlanId();
+    if (!plan_id) return;
+
+    const { error } = await supabase
+      .from("workout_plan_item")
+      .delete()
+      .eq("plan_id", plan_id)
+      .eq("sequence_no", sequence_no);
+
+    if (error) setMsg(error.message);
+    else await loadAll();
+  };
 
   const addExercise = async () => {
     setMsg("");
@@ -239,14 +441,14 @@ export default function LogPage() {
     if (ex.exercise_type === 1) {
       const lv = await fetchLastVals(ex.exercise_id);
       const target_sets = lv?.last_sets ?? 3;
-      const target_reps = lv?.last_reps ?? 10;
+      const lr = lv?.last_reps ?? 10;
+      const target_reps = isValidReps(lr) ? lr : 10;
       const target_load_kg = lv?.last_load_kg ?? null;
 
       const { error } = await supabase.from("workout_plan_item").insert({
         plan_id,
         sequence_no,
         exercise_id: ex.exercise_id,
-        // IMPORTANT: satisfy NOT NULL constraints
         target_sets,
         target_reps,
         target_load_kg,
@@ -258,7 +460,7 @@ export default function LogPage() {
         return;
       }
     } else {
-      // cardio: IMPORTANT: satisfy NOT NULL constraints (use 0s)
+      // cardio: keep NOT NULL fields safe
       const { error } = await supabase.from("workout_plan_item").insert({
         plan_id,
         sequence_no,
@@ -266,163 +468,74 @@ export default function LogPage() {
         target_sets: 0,
         target_reps: 0,
         target_load_kg: null,
-        target_duration_sec: 600, // 10 min warm-up default (editable)
+        target_duration_sec: 2400,
       });
 
       if (error) {
         setMsg(error.message);
         return;
       }
+
+      // set local duration so UI shows minutes immediately
+      setDurSec((p) => ({ ...p, [rowKey(plan_date, sequence_no)]: 2400 }));
     }
 
     setAddExerciseId("");
     setAddExerciseQuery("");
     await loadAll();
-    setMsg("Exercise added.");
   };
-
-  const removeExercise = async (sequence_no: number) => {
-    setMsg("");
-    const plan_id = await getPlanId();
-    if (!plan_id) return;
-
-    const { error } = await supabase
-      .from("workout_plan_item")
-      .delete()
-      .eq("plan_id", plan_id)
-      .eq("sequence_no", sequence_no);
-
-    if (error) {
-      setMsg(error.message);
-      return;
-    }
-
-    await loadAll();
-    setMsg("Exercise removed.");
-  };
-
-  const replaceExercise = async (sequence_no: number, new_exercise_id: number) => {
-    setMsg("");
-    const plan_id = await getPlanId();
-    if (!plan_id) return;
-
-    const newEx = exerciseList.find((x) => x.exercise_id === new_exercise_id);
-    if (!newEx) return;
-
-    // swap in DB
-    const { error } = await supabase
-      .from("workout_plan_item")
-      .update({ exercise_id: new_exercise_id })
-      .eq("plan_id", plan_id)
-      .eq("sequence_no", sequence_no);
-
-    if (error) {
-      setMsg(error.message);
-      return;
-    }
-
-    // IMPORTANT: if swapping to cardio, ensure NOT NULL targets exist
-    if (newEx.exercise_type === 2) {
-      await supabase
-        .from("workout_plan_item")
-        .update({
-          target_sets: 0,
-          target_reps: 0,
-          target_load_kg: null,
-          target_duration_sec: 600,
-        })
-        .eq("plan_id", plan_id)
-        .eq("sequence_no", sequence_no);
-    } else {
-      // strength: pull last values and write them immediately
-      const lv = await fetchLastVals(new_exercise_id);
-      const target_sets = lv?.last_sets ?? 3;
-      const target_reps = lv?.last_reps ?? 10;
-      const target_load_kg = lv?.last_load_kg ?? null;
-
-      await supabase
-        .from("workout_plan_item")
-        .update({
-          target_sets,
-          target_reps,
-          target_load_kg,
-          target_duration_sec: 0,
-        })
-        .eq("plan_id", plan_id)
-        .eq("sequence_no", sequence_no);
-    }
-
-    await loadAll();
-
-    // clear local rep error for that slot
-    const k = rowKey(todayIso(), sequence_no);
-    setRepErr((p) => {
-      const n = { ...p };
-      delete n[k];
-      return n;
-    });
-
-    setMsg("Exercise swapped.");
-  };
-
-  const payload: RowPayload[] = useMemo(() => {
-    return rows.map((r) => {
-      const k = rowKey(r.plan_date, r.sequence_no);
-
-      if (r.exercise_type === 2) {
-        const s = durSec[k] === "" || durSec[k] == null ? r.target_duration_sec ?? 600 : Number(durSec[k]);
-        const duration_sec = Number.isFinite(s) ? Math.trunc(s) : 600;
-        return { sequence_no: r.sequence_no, name: r.exercise_name, duration_sec };
-      }
-
-      const sCount = sets[k] === "" || sets[k] == null ? r.target_sets ?? 3 : Number(sets[k]);
-      const rep = reps[k] === "" || reps[k] == null ? r.target_reps ?? 10 : Number(reps[k]);
-      const load =
-        loads[k] === "" || loads[k] == null
-          ? r.suggested_load_kg ?? null
-          : loads[k] === null
-          ? null
-          : Number(loads[k]);
-
-      const setCount = Number.isFinite(sCount) ? Math.max(1, Math.trunc(sCount)) : 3;
-      const repInt = Number.isFinite(rep) ? Math.trunc(rep) : 10;
-
-      return {
-        sequence_no: r.sequence_no,
-        name: r.exercise_name,
-        sets: Array.from({ length: setCount }, () => ({
-          reps: repInt,
-          load_kg: load == null || Number.isNaN(load) ? null : load,
-        })),
-      };
-    });
-  }, [rows, sets, reps, loads, durSec]);
 
   const saveSession = async () => {
     setMsg("");
 
-    if (!sessionStart) {
-      setMsg("No session started. Click New session first.");
-      return;
+    // auto-start if missing (prevents dead-end)
+    let ss = sessionStart;
+    if (!ss) {
+      ss = new Date().toISOString();
+      window.localStorage.setItem(SESSION_KEY, ss);
+      setSessionStart(ss);
     }
 
-    // Validate reps ONLY for strength rows
-    for (const r of rows) {
-      if (r.exercise_type !== 1) continue;
-      const k = rowKey(r.plan_date, r.sequence_no);
-      const repRaw = reps[k] === "" || reps[k] == null ? r.target_reps ?? 10 : Number(reps[k]);
-      const repInt = Number.isFinite(repRaw) ? Math.trunc(repRaw) : NaN;
+    const payload: RowPayload[] = [];
 
-      if (!isValidReps(repInt)) {
-        setRepErr((p) => ({ ...p, [k]: `Reps must be ${REP_MIN}-${REP_MAX}` }));
-        setMsg(`Reps out of range for "${r.exercise_name}" (${REP_MIN}-${REP_MAX}).`);
+    for (const r of rows) {
+      const k = rowKey(r.plan_date, r.sequence_no);
+
+      if (r.exercise_type === 2) {
+        const dRaw =
+          durSec[k] === "" || durSec[k] == null ? r.target_duration_sec ?? 2400 : Number(durSec[k]);
+        const duration_sec = Number.isFinite(dRaw) ? dRaw : 2400;
+        payload.push({ sequence_no: r.sequence_no, name: r.exercise_name, duration_sec });
+        continue;
+      }
+
+      const setCountRaw = sets[k] === "" || sets[k] == null ? r.target_sets ?? 3 : Number(sets[k]);
+      const setCount = Number.isFinite(setCountRaw) && setCountRaw > 0 ? setCountRaw : 3;
+
+      const repRaw = reps[k] === "" || reps[k] == null ? r.target_reps ?? 10 : Number(reps[k]);
+      if (!isValidReps(repRaw)) {
+        setMsg(`Reps out of range for "${r.exercise_name}" (must be ${REP_MIN}-${REP_MAX}).`);
         return;
       }
+
+      const loadRaw =
+        loads[k] === "" || loads[k] == null
+          ? (r.target_load_kg ?? r.suggested_load_kg) ?? null
+          : Number(loads[k]);
+
+      const load_kg = Number.isFinite(loadRaw as number) ? (loadRaw as number) : null;
+
+      const setsArr: StrengthSet[] = Array.from({ length: setCount }, () => ({
+        reps: repRaw,
+        load_kg,
+      }));
+
+      payload.push({ sequence_no: r.sequence_no, name: r.exercise_name, sets: setsArr });
     }
 
     const { error } = await supabase.rpc("log_session_json", {
-      p_session_start: sessionStart,
-      p_duration_min: 60,
+      p_session_start: ss,
+      p_duration_min: durationMin,
       p_rows: payload,
     });
 
@@ -431,125 +544,127 @@ export default function LogPage() {
       return;
     }
 
-    setMsg("Session saved.");
+    setMsg("Saved.");
   };
 
-  if (loading) return <div style={{ padding: 16 }}>Loading…</div>;
+  if (!isAuthed) {
+    return (
+      <div style={{ padding: 16, maxWidth: 720 }}>
+        <h2 style={{ margin: 0 }}>Log session</h2>
+        <p style={{ marginTop: 10 }}>Sign in (magic link) to use the log page.</p>
+
+        <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 10 }}>
+          <input
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            placeholder="you@example.com"
+            style={{ padding: 10, width: 280 }}
+          />
+          <button onClick={signInMagicLink} style={{ padding: "10px 14px" }}>
+            Send link
+          </button>
+        </div>
+
+        {msg && <p style={{ color: "crimson", marginTop: 12 }}>{msg}</p>}
+      </div>
+    );
+  }
 
   return (
-    <main style={{ padding: 16, maxWidth: 1100, margin: "0 auto", fontFamily: "system-ui, sans-serif" }}>
-      {/* ACTION BAR (Save button always visible) */}
-      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginBottom: 12 }}>
-        <h2 style={{ margin: 0 }}>Log ({todayIso()})</h2>
+    <div style={{ padding: 16 }}>
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginBottom: 14 }}>
+        <h2 style={{ margin: 0, marginRight: 10 }}>Log session</h2>
 
         <button onClick={refreshPlan} style={{ padding: "8px 12px" }}>
           Refresh plan
+        </button>
+        <button onClick={loadAll} style={{ padding: "8px 12px" }}>
+          Reload
         </button>
 
         <button onClick={startNewSession} style={{ padding: "8px 12px" }}>
           New session
         </button>
 
-        <button onClick={saveSession} style={{ padding: "8px 12px", fontWeight: 700 }}>
+        <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          Duration (min)
+          <input
+            type="number"
+            value={durationMin}
+            onChange={(e) => setDurationMin(Number(e.target.value))}
+            style={{ width: 90, padding: 6 }}
+          />
+        </label>
+
+        <button onClick={saveSession} style={{ padding: "8px 12px" }}>
           Save session
         </button>
-
-        <span style={{ color: "#666" }}>
-          Session: <b>{sessionStart ? sessionStart : "—"}</b>
-        </span>
       </div>
 
-      {msg ? (
-        <div style={{ marginBottom: 12, padding: 10, border: "1px solid #ddd", borderRadius: 10, color: "#b00020" }}>
-          {msg}
-        </div>
-      ) : null}
-
-      {/* ADD EXERCISE (full list + narrows as you type) */}
-      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-start", marginBottom: 14 }}>
+      {/* Add exercise */}
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-start", marginBottom: 14 }}>
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          <div style={{ fontWeight: 600 }}>Add exercise</div>
-
           <input
             value={addExerciseQuery}
             onChange={(e) => setAddExerciseQuery(e.target.value)}
             placeholder="Type to filter…"
-            style={{ padding: 10, minWidth: 280 }}
+            style={{ padding: 10, minWidth: 260 }}
           />
 
           <select
             value={addExerciseId}
             onChange={(e) => setAddExerciseId(e.target.value === "" ? "" : Number(e.target.value))}
             size={10}
-            style={{ padding: 10, minWidth: 360 }}
+            style={{ padding: 10, minWidth: 320 }}
           >
-            <option value="">Select…</option>
+            <option value="">Select exercise…</option>
             {filteredAddExercises.map((e) => (
               <option key={e.exercise_id} value={e.exercise_id}>
                 {e.canonical_name}
               </option>
             ))}
           </select>
-
-          <div style={{ display: "flex", gap: 10 }}>
-            <button onClick={addExercise} style={{ padding: "8px 12px" }}>
-              Add
-            </button>
-            <button
-              onClick={() => {
-                setAddExerciseId("");
-                setAddExerciseQuery("");
-              }}
-              style={{ padding: "8px 12px" }}
-            >
-              Clear
-            </button>
-          </div>
         </div>
+
+        <button onClick={addExercise} style={{ padding: "10px 14px", height: 42 }}>
+          Add
+        </button>
       </div>
 
-      {/* ROWS */}
-      <table style={{ width: "100%", borderCollapse: "collapse" }}>
-        <thead>
-          <tr>
-            <th style={th}>#</th>
-            <th style={th}>Exercise</th>
-            <th style={th}>Edit</th>
-          </tr>
-        </thead>
+      {msg && <p style={{ color: msg === "Saved." ? "green" : "crimson" }}>{msg}</p>}
+      {loading && <p>Loading…</p>}
 
-        <tbody>
+      {!loading && rows.length === 0 && <p>No plan rows for today.</p>}
+
+      {!loading && rows.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           {rows.map((r) => {
             const k = rowKey(r.plan_date, r.sequence_no);
-
-            const curSets = sets[k] === "" || sets[k] == null ? r.target_sets ?? 3 : Number(sets[k]);
-            const curReps = reps[k] === "" || reps[k] == null ? r.target_reps ?? 10 : Number(reps[k]);
-            const curLoad =
-              loads[k] === "" || loads[k] == null ? r.suggested_load_kg ?? null : (loads[k] as number | null);
-
-            const curDur = durSec[k] === "" || durSec[k] == null ? r.target_duration_sec ?? 600 : Number(durSec[k]);
+            const isCardio = r.exercise_type === 2;
 
             return (
-              <tr key={k}>
-                <td style={td}>{r.sequence_no}</td>
-                <td style={td}>
-                  <div style={{ fontWeight: 700 }}>{r.exercise_name}</div>
-                  {repErr[k] ? <div style={{ color: "#b00020", marginTop: 6 }}>{repErr[k]}</div> : null}
-                </td>
+              <div
+                key={k}
+                style={{
+                  border: "1px solid #ddd",
+                  borderRadius: 10,
+                  padding: 12,
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 10,
+                }}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+                  <div style={{ fontWeight: 600 }}>
+                    {r.sequence_no}. {r.exercise_name}
+                  </div>
 
-                <td style={td}>
-                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                  <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
                     <select
-                      defaultValue=""
-                      onChange={(e) => {
-                        const v = e.target.value;
-                        if (!v) return;
-                        void replaceExercise(r.sequence_no, Number(v));
-                        e.currentTarget.value = "";
-                      }}
-                      style={{ padding: 10, minWidth: 260 }}
+                      value={r.exercise_id ?? ""}
+                      onChange={(e) => replaceExercise(r.sequence_no, Number(e.target.value))}
+                      style={{ padding: 8 }}
                     >
-                      <option value="">Swap…</option>
                       {exerciseList.map((e) => (
                         <option key={e.exercise_id} value={e.exercise_id}>
                           {e.canonical_name}
@@ -557,113 +672,105 @@ export default function LogPage() {
                       ))}
                     </select>
 
-                    <button onClick={() => void removeExercise(r.sequence_no)} style={{ padding: "8px 12px" }}>
+                    <button onClick={() => removeExercise(r.sequence_no)} style={{ padding: "8px 10px" }}>
                       Remove
                     </button>
+                  </div>
+                </div>
 
-                    {r.exercise_type === 2 ? (
-                      <>
-                        <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                          Minutes:
-                          <input
-                            type="number"
-                            min={1}
-                            step={1}
-                            value={Math.round((Number(curDur) || 600) / 60)}
-                            onChange={(e) => {
-                              const mins = e.target.value === "" ? 10 : Number(e.target.value);
-                              const sec = Math.max(60, Math.trunc(mins * 60));
-                              setDurSec((p) => ({ ...p, [k]: sec }));
-                              queueAutosave(r.sequence_no, { target_duration_sec: sec });
-                            }}
-                            style={{ width: 90, padding: 6 }}
-                          />
-                        </label>
-                      </>
-                    ) : (
-                      <>
-                        <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                          Sets:
-                          <input
-                            type="number"
-                            min={1}
-                            max={10}
-                            step={1}
-                            value={Number.isFinite(curSets) ? curSets : 3}
-                            onChange={(e) => {
-                              const v = e.target.value === "" ? "" : Math.max(1, Math.trunc(Number(e.target.value)));
-                              setSets((p) => ({ ...p, [k]: v }));
-                              if (v !== "") queueAutosave(r.sequence_no, { target_sets: v });
-                            }}
-                            style={{ width: 80, padding: 6 }}
-                          />
-                        </label>
+                <div style={{ display: "flex", gap: 14, flexWrap: "wrap", alignItems: "center" }}>
+                  {isCardio ? (
+                    <>
+                      <div>
+                        Target:{" "}
+                        <strong>{Math.round(((durSec[k] as number) ?? r.target_duration_sec ?? 2400) / 60)} min</strong>
+                      </div>
 
-                        <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                          Reps:
-                          <input
-                            type="number"
-                            min={REP_MIN}
-                            max={REP_MAX}
-                            step={1}
-                            value={Number.isFinite(curReps) ? curReps : 10}
-                            onChange={(e) => {
-                              const raw = e.target.value === "" ? "" : Math.trunc(Number(e.target.value));
-                              setReps((p) => ({ ...p, [k]: raw as any }));
+                      <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                        Duration (sec)
+                        <input
+                          type="number"
+                          value={durSec[k] ?? ""}
+                          onChange={(e) => {
+                            const sec = e.target.value === "" ? "" : Number(e.target.value);
+                            setDurSec((prev) => ({ ...prev, [k]: sec }));
+                            if (sec !== "") queueAutosave(r.sequence_no, { target_duration_sec: sec });
+                          }}
+                          style={{ width: 90, padding: 6 }}
+                        />
+                      </label>
+                    </>
+                  ) : (
+                    <>
+                      <label>
+                        Reps:{" "}
+                        <input
+                          type="number"
+                          value={reps[k] ?? ""}
+                          onChange={(e) => {
+                            const v = e.target.value === "" ? "" : Number(e.target.value);
+                            setReps((prev) => ({ ...prev, [k]: v }));
 
-                              // block autosave if invalid
-                              if (raw === "" || !isValidReps(Number(raw))) {
-                                setRepErr((p) => ({ ...p, [k]: `Reps must be ${REP_MIN}-${REP_MAX}` }));
-                                return;
-                              }
-
+                            if (v === "") {
                               setRepErr((p) => {
                                 const n = { ...p };
                                 delete n[k];
                                 return n;
                               });
+                              return;
+                            }
 
-                              queueAutosave(r.sequence_no, { target_reps: Number(raw) });
-                            }}
-                            style={{ width: 80, padding: 6 }}
-                          />
-                        </label>
+                            if (isValidReps(v)) {
+                              setRepErr((p) => {
+                                const n = { ...p };
+                                delete n[k];
+                                return n;
+                              });
+                              queueAutosave(r.sequence_no, { target_reps: v });
+                            } else {
+                              setRepErr((p) => ({ ...p, [k]: `${REP_MIN}-${REP_MAX} only` }));
+                            }
+                          }}
+                          style={{ width: 80, padding: 6 }}
+                        />
+                      </label>
+                      {repErr[k] && <span style={{ color: "crimson", fontSize: 12 }}>{repErr[k]}</span>}
 
-                        <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                          Load (kg):
-                          <input
-                            type="number"
-                            min={0}
-                            step={0.5}
-                            value={curLoad == null ? "" : curLoad}
-                            onChange={(e) => {
-                              const v = e.target.value === "" ? "" : Number(e.target.value);
-                              setLoads((p) => ({ ...p, [k]: v as any }));
-                              if (v !== "") queueAutosave(r.sequence_no, { target_load_kg: v });
-                            }}
-                            style={{ width: 110, padding: 6 }}
-                          />
-                        </label>
-                      </>
-                    )}
-                  </div>
-                </td>
-              </tr>
+                      <label>
+                        Load (kg):{" "}
+                        <input
+                          type="number"
+                          value={loads[k] ?? ""}
+                          onChange={(e) => {
+                            const v = e.target.value === "" ? "" : Number(e.target.value);
+                            setLoads((prev) => ({ ...prev, [k]: v }));
+                            if (v !== "") queueAutosave(r.sequence_no, { target_load_kg: v });
+                          }}
+                          style={{ width: 110, padding: 6 }}
+                        />
+                      </label>
+
+                      <label>
+                        Sets:{" "}
+                        <input
+                          type="number"
+                          value={sets[k] ?? ""}
+                          onChange={(e) => {
+                            const v = e.target.value === "" ? "" : Number(e.target.value);
+                            setSets((prev) => ({ ...prev, [k]: v }));
+                            if (v !== "") queueAutosave(r.sequence_no, { target_sets: v });
+                          }}
+                          style={{ width: 70, padding: 6 }}
+                        />
+                      </label>
+                    </>
+                  )}
+                </div>
+              </div>
             );
           })}
-
-          {rows.length === 0 ? (
-            <tr>
-              <td style={td} colSpan={3}>
-                No rows for today.
-              </td>
-            </tr>
-          ) : null}
-        </tbody>
-      </table>
-    </main>
+        </div>
+      )}
+    </div>
   );
 }
-
-const th: React.CSSProperties = { textAlign: "left", padding: 10, borderBottom: "1px solid #ddd" };
-const td: React.CSSProperties = { padding: 10, borderBottom: "1px solid #eee", verticalAlign: "top" };
