@@ -3,17 +3,19 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 
+type Mode = "plan" | "adhoc";
+
 type PlanRowFromView = {
-  plan_date?: string;
+  plan_date: string;
   sequence_no: number;
-  exercise_id?: number | null; // may or may not exist in view
+  exercise_id: number | null;
   exercise_name: string;
   exercise_type: number; // 1 strength, 2 cardio
   target_sets: number | null;
   target_reps: number | null;
   target_duration_sec: number | null;
   suggested_load_kg: number | null;
-  target_load_kg?: number | null;
+  target_load_kg: number | null;
 };
 
 type Exercise = {
@@ -25,30 +27,26 @@ type Exercise = {
   is_active: boolean;
 };
 
+type Row = {
+  source: Mode;
+  plan_date: string;
+  sequence_no: number;
+  exercise_id: number | null;
+  exercise_name: string;
+  exercise_type: number; // 1 or 2
+  target_sets: number | null;
+  target_reps: number | null;
+  target_duration_sec: number | null;
+  suggested_load_kg: number | null;
+  target_load_kg: number | null;
+};
+
 type StrengthSet = { reps: number; load_kg: number | null };
 type CardioSet = { duration_sec: number; calories_kcal?: number | null };
 
 type RowPayload =
   | { sequence_no: number; kind: "strength"; name: string; sets: StrengthSet[] }
   | { sequence_no: number; kind: "cardio"; name: string; sets: CardioSet[] };
-
-type Mode = "plan" | "adhoc";
-
-type Row = {
-  source: Mode;
-  plan_date: string;
-  sequence_no: number;
-
-  exercise_id: number | null;
-  exercise_name: string;
-  exercise_type: number; // 1 or 2
-
-  target_sets: number | null;
-  target_reps: number | null;
-  target_duration_sec: number | null;
-  suggested_load_kg: number | null;
-  target_load_kg?: number | null;
-};
 
 type PlanItemPatch = {
   exercise_id?: number;
@@ -64,13 +62,12 @@ const REP_MAX = 20;
 
 const todayIso = () => new Date().toISOString().slice(0, 10);
 const rowKey = (planDate: string, seq: number) => `${planDate}-${seq}`;
-const hasKey = (obj: Record<string, any>, key: string) =>
-  Object.prototype.hasOwnProperty.call(obj, key);
 
-const clampReps = (v: number) => Math.max(REP_MIN, Math.min(REP_MAX, Math.round(v)));
-const isValidReps = (v: number) => Number.isFinite(v) && v >= REP_MIN && v <= REP_MAX;
-
-function asNumOrBlank(v: string): number | "" {
+/**
+ * Controlled numeric inputs in React + type="number" can make it painful to clear.
+ * We keep the UI inputs as text, parse to number on change, and allow "".
+ */
+function parseNumberOrBlank(v: string): number | "" {
   if (v === "") return "";
   const n = Number(v);
   return Number.isFinite(n) ? n : "";
@@ -81,6 +78,8 @@ function asIntOrNull(v: number | "" | null | undefined): number | null {
   if (!Number.isFinite(n)) return null;
   return Math.max(0, Math.round(n));
 }
+const clampReps = (v: number) => Math.max(REP_MIN, Math.min(REP_MAX, Math.round(v)));
+const isValidReps = (v: number) => Number.isFinite(v) && v >= REP_MIN && v <= REP_MAX;
 
 export default function LogPage() {
   const [mode, setMode] = useState<Mode>("plan");
@@ -92,10 +91,9 @@ export default function LogPage() {
   const [exerciseList, setExerciseList] = useState<Exercise[]>([]);
   const [planId, setPlanId] = useState<number | null>(null);
 
-  const [msg, setMsg] = useState<string>(""); // general / plan messages
-  const [exerciseMsg, setExerciseMsg] = useState<string>(""); // exercise-load messages (won't get wiped)
+  const [msg, setMsg] = useState("");
 
-  const [sessionStart, setSessionStart] = useState<string>("");
+  const [sessionStart, setSessionStart] = useState("");
   const [sessionDurationMin, setSessionDurationMin] = useState<number>(60);
 
   const autosaveTimers = useRef<Record<string, any>>({});
@@ -107,7 +105,7 @@ export default function LogPage() {
   const [caloriesKcal, setCaloriesKcal] = useState<Record<string, number | "">>({});
 
   const [addExerciseId, setAddExerciseId] = useState<number | "">("");
-  const [addExerciseQuery, setAddExerciseQuery] = useState<string>("");
+  const [addExerciseQuery, setAddExerciseQuery] = useState("");
 
   const [swapPick, setSwapPick] = useState<Record<string, number | "">>({});
 
@@ -140,67 +138,40 @@ export default function LogPage() {
     setMsg("New session started.");
   };
 
-  // ✅ Robust exercise loader:
-  // - tries to select the new columns
-  // - if the DB doesn't have them yet, falls back to a minimal select and defaults them to false
   const loadExerciseList = async () => {
-    setExerciseMsg("");
-
-    // attempt full select first
-    {
-      const { data, error } = await supabase
-        .from("exercise")
-        .select("exercise_id, canonical_name, exercise_type, is_manual_only, is_distance_based, is_active")
-        .eq("is_active", true)
-        .order("canonical_name", { ascending: true });
-
-      if (!error) {
-        const list = ((data as any[]) ?? []).map<Exercise>((r) => ({
-          exercise_id: Number(r.exercise_id),
-          canonical_name: String(r.canonical_name),
-          exercise_type: Number(r.exercise_type),
-          is_manual_only: !!r.is_manual_only,
-          is_distance_based: !!r.is_distance_based,
-          is_active: !!r.is_active,
-        }));
-        setExerciseList(list);
-        return;
-      }
-
-      // if it failed because a column doesn't exist, we fallback
-      const msg = String((error as any)?.message ?? error);
-      if (!msg.toLowerCase().includes("does not exist") && !msg.toLowerCase().includes("column")) {
-        setExerciseMsg(msg);
-        setExerciseList([]);
-        return;
-      }
-    }
-
-    // fallback minimal select
-    const { data: data2, error: error2 } = await supabase
+    const { data, error } = await supabase
       .from("exercise")
-      .select("exercise_id, canonical_name, exercise_type, is_active")
+      .select("exercise_id, canonical_name, exercise_type, is_manual_only, is_distance_based, is_active")
       .eq("is_active", true)
       .order("canonical_name", { ascending: true });
 
-    if (error2) {
-      setExerciseMsg(String((error2 as any)?.message ?? error2));
+    if (error) {
+      setMsg(error.message);
       setExerciseList([]);
       return;
     }
 
-    const list2 = ((data2 as any[]) ?? []).map<Exercise>((r) => ({
+    const list = ((data as any[]) ?? []).map<Exercise>((r) => ({
       exercise_id: Number(r.exercise_id),
       canonical_name: String(r.canonical_name),
       exercise_type: Number(r.exercise_type),
-      is_manual_only: false,
-      is_distance_based: false,
+      is_manual_only: !!r.is_manual_only,
+      is_distance_based: !!r.is_distance_based,
       is_active: !!r.is_active,
     }));
-    setExerciseList(list2);
+    setExerciseList(list);
+  };
 
-    // Tell you why the extra flags are missing (helps debugging)
-    setExerciseMsg("Note: exercise flags not loaded (missing columns). Using defaults.");
+  const exerciseById = useMemo(() => {
+    const m = new Map<number, Exercise>();
+    for (const e of exerciseList) m.set(e.exercise_id, e);
+    return m;
+  }, [exerciseList]);
+
+  const isDistanceBasedRow = (r: Row) => {
+    if (r.exercise_type !== 2) return false;
+    if (r.exercise_id == null) return false;
+    return !!exerciseById.get(r.exercise_id)?.is_distance_based;
   };
 
   const getPersonId = async (): Promise<number | null> => {
@@ -223,6 +194,7 @@ export default function LogPage() {
       .limit(1);
 
     if (error) return null;
+
     const id = (data as any[])?.[0]?.plan_id;
     const n = Number(id);
     if (!Number.isFinite(n)) return null;
@@ -236,27 +208,8 @@ export default function LogPage() {
   };
 
   const getRowDefaultLoad = (r: Row) => {
-    const tl = (r as any).target_load_kg;
-    if (tl !== undefined && tl !== null) return Number(tl);
+    if (r.target_load_kg != null) return Number(r.target_load_kg);
     return r.suggested_load_kg ?? null;
-  };
-
-  const exerciseById = useMemo(() => {
-    const m = new Map<number, Exercise>();
-    for (const e of exerciseList) m.set(e.exercise_id, e);
-    return m;
-  }, [exerciseList]);
-
-  const exerciseByName = useMemo(() => {
-    const m = new Map<string, Exercise>();
-    for (const e of exerciseList) m.set(e.canonical_name.trim().toLowerCase(), e);
-    return m;
-  }, [exerciseList]);
-
-  const isDistanceBasedRow = (r: Row) => {
-    if (r.exercise_type !== 2) return false;
-    if (r.exercise_id != null) return !!exerciseById.get(r.exercise_id)?.is_distance_based;
-    return !!exerciseByName.get(r.exercise_name.trim().toLowerCase())?.is_distance_based;
   };
 
   const clearLocalEditsForKey = (k: string) => {
@@ -293,7 +246,6 @@ export default function LogPage() {
   };
 
   const loadTodayPlanRows = async () => {
-    // IMPORTANT: do NOT wipe exerciseMsg here
     setMsg("");
 
     const planDate = todayIso();
@@ -312,17 +264,14 @@ export default function LogPage() {
       source: "plan",
       plan_date: planDate,
       sequence_no: r.sequence_no,
-      exercise_id:
-        (r as any).exercise_id ??
-        exerciseByName.get(r.exercise_name.trim().toLowerCase())?.exercise_id ??
-        null,
+      exercise_id: r.exercise_id ?? null,
       exercise_name: r.exercise_name,
       exercise_type: r.exercise_type,
       target_sets: r.target_sets,
       target_reps: r.target_reps,
       target_duration_sec: r.target_duration_sec,
       suggested_load_kg: r.suggested_load_kg,
-      target_load_kg: (r as any).target_load_kg ?? null,
+      target_load_kg: r.target_load_kg ?? null,
     }));
 
     setRows(src);
@@ -436,6 +385,7 @@ export default function LogPage() {
           target_reps: ex.exercise_type === 1 ? 10 : null,
           target_duration_sec: ex.exercise_type === 2 ? 8 * 60 : null,
           suggested_load_kg: null,
+          target_load_kg: null,
         },
       ]);
 
@@ -578,15 +528,14 @@ export default function LogPage() {
 
       if (r.exercise_type === 2) {
         const defaultMins = Math.round((r.target_duration_sec ?? 0) / 60);
-        const mins = (hasKey(durationsMin, k) ? durationsMin[k] : defaultMins) as number | "";
+        const mins = (durationsMin[k] ?? defaultMins) as number | "";
         const minutes = mins === "" ? defaultMins : Number(mins);
         const duration_sec = Math.max(0, Math.round(minutes * 60));
 
         const cardioSet: CardioSet = { duration_sec };
 
         if (isDistanceBasedRow(r)) {
-          const cal = hasKey(caloriesKcal, k) ? caloriesKcal[k] : "";
-          cardioSet.calories_kcal = asIntOrNull(cal);
+          cardioSet.calories_kcal = asIntOrNull(caloriesKcal[k] ?? "");
         }
 
         out.push({
@@ -602,9 +551,9 @@ export default function LogPage() {
       const defaultReps = r.target_reps ?? 10;
       const defaultLoad = getRowDefaultLoad(r);
 
-      const setCount = (hasKey(sets, k) ? sets[k] : defaultSets) as number | "";
-      const repsVal = (hasKey(reps, k) ? reps[k] : defaultReps) as number | "";
-      const loadVal = (hasKey(loads, k) ? loads[k] : (defaultLoad ?? "")) as number | "";
+      const setCount = (sets[k] ?? defaultSets) as number | "";
+      const repsVal = (reps[k] ?? defaultReps) as number | "";
+      const loadVal = (loads[k] ?? (defaultLoad ?? "")) as number | "";
 
       const s = setCount === "" ? defaultSets : Number(setCount);
       const repNum = repsVal === "" ? defaultReps : Number(repsVal);
@@ -627,7 +576,7 @@ export default function LogPage() {
     }
 
     return out;
-  }, [rows, sets, reps, loads, durationsMin, caloriesKcal, exerciseList]);
+  }, [rows, sets, reps, loads, durationsMin, caloriesKcal, exerciseById]);
 
   const saveSession = async () => {
     setMsg("");
@@ -639,7 +588,7 @@ export default function LogPage() {
       if (r.exercise_type !== 1) continue;
       const k = rowKey(todayIso(), r.sequence_no);
       const defaultReps = r.target_reps ?? 10;
-      const repRaw = hasKey(reps, k) ? reps[k] : defaultReps;
+      const repRaw = reps[k] ?? defaultReps;
       const repNum = repRaw === "" ? defaultReps : Number(repRaw);
       if (!isValidReps(repNum)) {
         setMsg(`Reps out of range for "${r.exercise_name}" (must be ${REP_MIN}-${REP_MAX}).`);
@@ -678,6 +627,7 @@ export default function LogPage() {
       await loadExerciseList();
       await loadTodayPlanRows();
     })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAuthed]);
 
   const filteredAddExercises = useMemo(() => {
@@ -694,6 +644,7 @@ export default function LogPage() {
       <main style={{ padding: 20, maxWidth: 900, margin: "0 auto" }}>
         <h1>Log session</h1>
         <p>Sign in to continue.</p>
+
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
           <input
             value={email}
@@ -705,6 +656,7 @@ export default function LogPage() {
             Send magic link
           </button>
         </div>
+
         {msg && <p style={{ marginTop: 12 }}>{msg}</p>}
       </main>
     );
@@ -713,13 +665,6 @@ export default function LogPage() {
   return (
     <main style={{ padding: 20, maxWidth: 1100, margin: "0 auto" }}>
       <h1 style={{ marginBottom: 8 }}>Log session</h1>
-
-      {/* DEBUG */}
-      <div style={{ color: "#999", marginBottom: 10 }}>
-        EX COUNT: {exerciseList.length} · URL: {process.env.NEXT_PUBLIC_SUPABASE_URL}
-      </div>
-
-      {exerciseMsg && <div style={{ marginBottom: 10, color: "#caa" }}>{exerciseMsg}</div>}
 
       <div style={{ color: "#666", marginBottom: 12 }}>
         Date: <b>{todayIso()}</b> · Mode: <b>{mode === "plan" ? "Plan" : "Ad-hoc"}</b> · Plan ID:{" "}
@@ -743,9 +688,13 @@ export default function LogPage() {
         <label style={{ marginLeft: 6 }}>
           Duration (min):{" "}
           <input
-            type="number"
-            value={sessionDurationMin}
-            onChange={(e) => setSessionDurationMin(Number(e.target.value))}
+            type="text"
+            inputMode="numeric"
+            value={String(sessionDurationMin)}
+            onChange={(e) => {
+              const v = parseNumberOrBlank(e.target.value);
+              setSessionDurationMin(v === "" ? 0 : Math.max(0, Math.round(v)));
+            }}
             style={{ width: 90, padding: 6 }}
           />
         </label>
@@ -798,16 +747,16 @@ export default function LogPage() {
             {rows.map((r) => {
               const k = rowKey(todayIso(), r.sequence_no);
 
-              const showSets = (hasKey(sets, k) ? sets[k] : (r.target_sets ?? 3)) as number | "";
-              const showReps = (hasKey(reps, k) ? reps[k] : (r.target_reps ?? 10)) as number | "";
+              const showSets = (sets[k] ?? (r.target_sets ?? 3)) as number | "";
+              const showReps = (reps[k] ?? (r.target_reps ?? 10)) as number | "";
 
               const defaultLoad = getRowDefaultLoad(r);
-              const showLoad = (hasKey(loads, k) ? loads[k] : (defaultLoad ?? "")) as number | "";
+              const showLoad = (loads[k] ?? (defaultLoad ?? "")) as number | "";
 
               const targetMin = r.target_duration_sec != null ? Math.round(r.target_duration_sec / 60) : 0;
-              const showMin = (hasKey(durationsMin, k) ? durationsMin[k] : targetMin) as number | "";
+              const showMin = (durationsMin[k] ?? targetMin) as number | "";
 
-              const showCalories = (hasKey(caloriesKcal, k) ? caloriesKcal[k] : "") as number | "";
+              const showCalories = (caloriesKcal[k] ?? "") as number | "";
               const showCaloriesField = isDistanceBasedRow(r);
 
               return (
@@ -821,15 +770,13 @@ export default function LogPage() {
                         <label>
                           Reps:
                           <input
-                            type="number"
-                            min={REP_MIN}
-                            max={REP_MAX}
-                            value={showReps as any}
+                            type="text"
+                            inputMode="numeric"
+                            value={showReps === "" ? "" : String(showReps)}
                             onChange={(e) => {
-                              const raw = asNumOrBlank(e.target.value);
+                              const raw = parseNumberOrBlank(e.target.value);
                               setReps((prev) => ({ ...prev, [k]: raw }));
-                              if (raw !== "" && mode === "plan")
-                                queueAutosave(r.sequence_no, { target_reps: clampReps(raw) });
+                              if (raw !== "" && mode === "plan") queueAutosave(r.sequence_no, { target_reps: clampReps(raw) });
                             }}
                             style={{ width: 90, marginLeft: 6, padding: 6 }}
                           />
@@ -838,12 +785,13 @@ export default function LogPage() {
                         <label>
                           Load (kg):
                           <input
-                            type="number"
-                            value={showLoad as any}
+                            type="text"
+                            inputMode="decimal"
+                            value={showLoad === "" ? "" : String(showLoad)}
                             onChange={(e) => {
-                              const v = asNumOrBlank(e.target.value);
+                              const v = parseNumberOrBlank(e.target.value);
                               setLoads((prev) => ({ ...prev, [k]: v }));
-                              if (v !== "" && mode === "plan") queueAutosave(r.sequence_no, { target_load_kg: v });
+                              if (mode === "plan") queueAutosave(r.sequence_no, { target_load_kg: v === "" ? null : v });
                             }}
                             style={{ width: 110, marginLeft: 6, padding: 6 }}
                           />
@@ -852,13 +800,13 @@ export default function LogPage() {
                         <label>
                           Sets:
                           <input
-                            type="number"
-                            value={showSets as any}
+                            type="text"
+                            inputMode="numeric"
+                            value={showSets === "" ? "" : String(showSets)}
                             onChange={(e) => {
-                              const v = asNumOrBlank(e.target.value);
+                              const v = parseNumberOrBlank(e.target.value);
                               setSets((prev) => ({ ...prev, [k]: v }));
-                              if (v !== "" && mode === "plan")
-                                queueAutosave(r.sequence_no, { target_sets: Math.max(1, Math.round(v)) });
+                              if (v !== "" && mode === "plan") queueAutosave(r.sequence_no, { target_sets: Math.max(1, Math.round(v)) });
                             }}
                             style={{ width: 70, marginLeft: 6, padding: 6 }}
                           />
@@ -875,15 +823,14 @@ export default function LogPage() {
                         <label>
                           Duration (min):
                           <input
-                            type="number"
-                            min={0}
-                            value={showMin as any}
+                            type="text"
+                            inputMode="numeric"
+                            value={showMin === "" ? "" : String(showMin)}
                             onChange={(e) => {
-                              const v = asNumOrBlank(e.target.value);
+                              const v = parseNumberOrBlank(e.target.value);
                               setDurationsMin((prev) => ({ ...prev, [k]: v }));
-                              if (v !== "" && mode === "plan") {
-                                queueAutosave(r.sequence_no, { target_duration_sec: Math.max(0, Math.round(v * 60)) });
-                              }
+                              if (v !== "" && mode === "plan") queueAutosave(r.sequence_no, { target_duration_sec: Math.max(0, Math.round(v * 60)) });
+                              if (v === "" && mode === "plan") queueAutosave(r.sequence_no, { target_duration_sec: 0 });
                             }}
                             style={{ width: 90, marginLeft: 6, padding: 6 }}
                           />
@@ -893,11 +840,11 @@ export default function LogPage() {
                           <label>
                             Calories (kcal):
                             <input
-                              type="number"
-                              min={0}
-                              value={showCalories as any}
+                              type="text"
+                              inputMode="numeric"
+                              value={showCalories === "" ? "" : String(showCalories)}
                               onChange={(e) => {
-                                const v = asNumOrBlank(e.target.value);
+                                const v = parseNumberOrBlank(e.target.value);
                                 setCaloriesKcal((prev) => ({ ...prev, [k]: v }));
                               }}
                               style={{ width: 120, marginLeft: 6, padding: 6 }}
