@@ -44,6 +44,9 @@ const ADD_EXERCISE_MAX_OPTIONS = 500;
 const todayIso = () => new Date().toISOString().slice(0, 10);
 const rowKey = (planDate: string, seq: number) => `${planDate}-${seq}`;
 
+const hasKey = (obj: Record<string, any>, key: string) =>
+  Object.prototype.hasOwnProperty.call(obj, key);
+
 const clampReps = (v: number) => Math.max(REP_MIN, Math.min(REP_MAX, Math.round(v)));
 const isValidReps = (v: number) => Number.isFinite(v) && v >= REP_MIN && v <= REP_MAX;
 
@@ -395,10 +398,10 @@ export default function LogPage() {
       const k = rowKey(planDate, r.sequence_no);
 
       if (r.exercise_type === 2) {
-        const mins =
-          durationsMin[k] === "" || durationsMin[k] == null
-            ? Math.round((r.target_duration_sec ?? 0) / 60)
-            : Number(durationsMin[k]);
+        const defaultMins = Math.round((r.target_duration_sec ?? 0) / 60);
+        const minsRaw = hasKey(durationsMin, k) ? durationsMin[k] : defaultMins;
+        const mins = minsRaw === "" ? defaultMins : Number(minsRaw);
+
         out.push({
           sequence_no: r.sequence_no,
           name: r.exercise_name,
@@ -407,11 +410,20 @@ export default function LogPage() {
         continue;
       }
 
-      const setCount = sets[k] === "" || sets[k] == null ? r.target_sets ?? 3 : Number(sets[k]);
-      const repRaw = reps[k] === "" || reps[k] == null ? r.target_reps ?? 10 : Number(reps[k]);
-      const rep = clampReps(repRaw);
-      const loadRaw = loads[k] === "" || loads[k] == null ? getRowDefaultLoad(r) : Number(loads[k]);
-      const load = loadRaw == null || Number.isNaN(loadRaw as any) ? null : Number(loadRaw);
+      const defaultSets = r.target_sets ?? 3;
+      const defaultReps = r.target_reps ?? 10;
+      const defaultLoad = getRowDefaultLoad(r); // number | null
+
+      const setRaw = hasKey(sets, k) ? sets[k] : defaultSets;
+      const setCount = setRaw === "" ? defaultSets : Number(setRaw);
+
+      const repRaw = hasKey(reps, k) ? reps[k] : defaultReps;
+      const repNum = repRaw === "" ? defaultReps : Number(repRaw);
+      const rep = clampReps(repNum);
+
+      const loadRaw = hasKey(loads, k) ? loads[k] : defaultLoad;
+      const load =
+        loadRaw == null || loadRaw == "" || Number.isNaN(Number(loadRaw)) ? null : Number(loadRaw);
 
       const setsArr: StrengthSet[] = [];
       for (let i = 0; i < Math.max(1, Math.round(setCount)); i++) {
@@ -435,8 +447,12 @@ export default function LogPage() {
     for (const r of rows) {
       if (r.exercise_type !== 1) continue;
       const k = rowKey(todayIso(), r.sequence_no);
-      const repRaw = reps[k] === "" || reps[k] == null ? (r.target_reps ?? 10) : Number(reps[k]);
-      if (!isValidReps(repRaw)) {
+
+      const defaultReps = r.target_reps ?? 10;
+      const repRaw = hasKey(reps, k) ? reps[k] : defaultReps;
+      const repNum = repRaw === "" ? defaultReps : Number(repRaw);
+
+      if (!isValidReps(repNum)) {
         setMsg(`Reps out of range for "${r.exercise_name}" (must be ${REP_MIN}-${REP_MAX}).`);
         return;
       }
@@ -613,13 +629,14 @@ export default function LogPage() {
               const planDate = todayIso();
               const k = rowKey(planDate, r.sequence_no);
 
-              const showSets = sets[k] === "" || sets[k] == null ? r.target_sets ?? 3 : Number(sets[k]);
-              const showReps = reps[k] === "" || reps[k] == null ? r.target_reps ?? 10 : Number(reps[k]);
+              const showSets = hasKey(sets, k) ? sets[k] : (r.target_sets ?? 3);
+              const showReps = hasKey(reps, k) ? reps[k] : (r.target_reps ?? 10);
+
               const defaultLoad = getRowDefaultLoad(r);
-              const showLoad = loads[k] === "" || loads[k] == null ? (defaultLoad ?? "") : loads[k];
+              const showLoad = hasKey(loads, k) ? loads[k] : (defaultLoad ?? "");
 
               const targetMin = r.target_duration_sec != null ? Math.round(r.target_duration_sec / 60) : 0;
-              const showMin = durationsMin[k] === "" || durationsMin[k] == null ? targetMin : Number(durationsMin[k]);
+              const showMin = hasKey(durationsMin, k) ? durationsMin[k] : targetMin;
 
               return (
                 <tr key={k}>
@@ -635,7 +652,7 @@ export default function LogPage() {
                             type="number"
                             min={REP_MIN}
                             max={REP_MAX}
-                            value={showReps}
+                            value={showReps as any}
                             onChange={(e) => {
                               const raw = e.target.value === "" ? "" : Number(e.target.value);
                               setReps((prev) => ({ ...prev, [k]: raw }));
@@ -663,7 +680,7 @@ export default function LogPage() {
                           Sets:
                           <input
                             type="number"
-                            value={showSets}
+                            value={showSets as any}
                             onChange={(e) => {
                               const v = e.target.value === "" ? "" : Number(e.target.value);
                               setSets((prev) => ({ ...prev, [k]: v }));
@@ -681,7 +698,7 @@ export default function LogPage() {
                         <input
                           type="number"
                           min={0}
-                          value={showMin}
+                          value={showMin as any}
                           onChange={(e) => {
                             const v = e.target.value === "" ? "" : Number(e.target.value);
                             setDurationsMin((prev) => ({ ...prev, [k]: v }));
