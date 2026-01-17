@@ -92,7 +92,8 @@ export default function LogPage() {
   const [exerciseList, setExerciseList] = useState<Exercise[]>([]);
   const [planId, setPlanId] = useState<number | null>(null);
 
-  const [msg, setMsg] = useState<string>("");
+  const [msg, setMsg] = useState<string>(""); // general / plan messages
+  const [exerciseMsg, setExerciseMsg] = useState<string>(""); // exercise-load messages (won't get wiped)
 
   const [sessionStart, setSessionStart] = useState<string>("");
   const [sessionDurationMin, setSessionDurationMin] = useState<number>(60);
@@ -139,18 +140,67 @@ export default function LogPage() {
     setMsg("New session started.");
   };
 
+  // ✅ Robust exercise loader:
+  // - tries to select the new columns
+  // - if the DB doesn't have them yet, falls back to a minimal select and defaults them to false
   const loadExerciseList = async () => {
-    const { data, error } = await supabase
+    setExerciseMsg("");
+
+    // attempt full select first
+    {
+      const { data, error } = await supabase
+        .from("exercise")
+        .select("exercise_id, canonical_name, exercise_type, is_manual_only, is_distance_based, is_active")
+        .eq("is_active", true)
+        .order("canonical_name", { ascending: true });
+
+      if (!error) {
+        const list = ((data as any[]) ?? []).map<Exercise>((r) => ({
+          exercise_id: Number(r.exercise_id),
+          canonical_name: String(r.canonical_name),
+          exercise_type: Number(r.exercise_type),
+          is_manual_only: !!r.is_manual_only,
+          is_distance_based: !!r.is_distance_based,
+          is_active: !!r.is_active,
+        }));
+        setExerciseList(list);
+        return;
+      }
+
+      // if it failed because a column doesn't exist, we fallback
+      const msg = String((error as any)?.message ?? error);
+      if (!msg.toLowerCase().includes("does not exist") && !msg.toLowerCase().includes("column")) {
+        setExerciseMsg(msg);
+        setExerciseList([]);
+        return;
+      }
+    }
+
+    // fallback minimal select
+    const { data: data2, error: error2 } = await supabase
       .from("exercise")
-      .select("exercise_id, canonical_name, exercise_type, is_manual_only, is_distance_based, is_active")
+      .select("exercise_id, canonical_name, exercise_type, is_active")
       .eq("is_active", true)
       .order("canonical_name", { ascending: true });
 
-    if (error) {
-      setMsg(error.message);
+    if (error2) {
+      setExerciseMsg(String((error2 as any)?.message ?? error2));
+      setExerciseList([]);
       return;
     }
-    setExerciseList((data as Exercise[]) ?? []);
+
+    const list2 = ((data2 as any[]) ?? []).map<Exercise>((r) => ({
+      exercise_id: Number(r.exercise_id),
+      canonical_name: String(r.canonical_name),
+      exercise_type: Number(r.exercise_type),
+      is_manual_only: false,
+      is_distance_based: false,
+      is_active: !!r.is_active,
+    }));
+    setExerciseList(list2);
+
+    // Tell you why the extra flags are missing (helps debugging)
+    setExerciseMsg("Note: exercise flags not loaded (missing columns). Using defaults.");
   };
 
   const getPersonId = async (): Promise<number | null> => {
@@ -243,9 +293,10 @@ export default function LogPage() {
   };
 
   const loadTodayPlanRows = async () => {
+    // IMPORTANT: do NOT wipe exerciseMsg here
     setMsg("");
-    const planDate = todayIso();
 
+    const planDate = todayIso();
     const { data, error } = await supabase
       .from("v_plan_today_edit")
       .select("*")
@@ -286,7 +337,6 @@ export default function LogPage() {
 
     for (const row of src) {
       const k = rowKey(planDate, row.sequence_no);
-
       if (row.exercise_type === 1) {
         nextSets[k] = row.target_sets ?? 3;
         nextReps[k] = row.target_reps ?? 10;
@@ -664,10 +714,12 @@ export default function LogPage() {
     <main style={{ padding: 20, maxWidth: 1100, margin: "0 auto" }}>
       <h1 style={{ marginBottom: 8 }}>Log session</h1>
 
-      {/* DEBUG: shows whether exercises are loading + which Supabase URL the build is using */}
+      {/* DEBUG */}
       <div style={{ color: "#999", marginBottom: 10 }}>
         EX COUNT: {exerciseList.length} · URL: {process.env.NEXT_PUBLIC_SUPABASE_URL}
       </div>
+
+      {exerciseMsg && <div style={{ marginBottom: 10, color: "#caa" }}>{exerciseMsg}</div>}
 
       <div style={{ color: "#666", marginBottom: 12 }}>
         Date: <b>{todayIso()}</b> · Mode: <b>{mode === "plan" ? "Plan" : "Ad-hoc"}</b> · Plan ID:{" "}
