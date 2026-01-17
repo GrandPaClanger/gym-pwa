@@ -3,17 +3,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 
-type PlanRow = {
-  person_id: number;
-  plan_date: string;
+type PlanRowFromView = {
+  plan_date?: string;
   sequence_no: number;
+  exercise_id?: number | null; // may or may not exist in view
   exercise_name: string;
   exercise_type: number; // 1 strength, 2 cardio
   target_sets: number | null;
   target_reps: number | null;
   target_duration_sec: number | null;
   suggested_load_kg: number | null;
-  // optional (some views include it)
   target_load_kg?: number | null;
 };
 
@@ -21,12 +20,35 @@ type Exercise = {
   exercise_id: number;
   canonical_name: string;
   exercise_type: number; // 1 strength, 2 cardio
+  is_manual_only: boolean;
+  is_distance_based: boolean;
+  is_active: boolean;
 };
 
 type StrengthSet = { reps: number; load_kg: number | null };
+type CardioSet = { duration_sec: number; calories_kcal?: number | null };
+
 type RowPayload =
-  | { sequence_no: number; name: string; duration_sec: number }
-  | { sequence_no: number; name: string; sets: StrengthSet[] };
+  | { sequence_no: number; kind: "strength"; name: string; sets: StrengthSet[] }
+  | { sequence_no: number; kind: "cardio"; name: string; sets: CardioSet[] };
+
+type Mode = "plan" | "adhoc";
+
+type Row = {
+  source: Mode;
+  plan_date: string;
+  sequence_no: number;
+
+  exercise_id: number | null;
+  exercise_name: string;
+  exercise_type: number; // 1 or 2
+
+  target_sets: number | null;
+  target_reps: number | null;
+  target_duration_sec: number | null;
+  suggested_load_kg: number | null;
+  target_load_kg?: number | null;
+};
 
 type PlanItemPatch = {
   exercise_id?: number;
@@ -39,48 +61,53 @@ type PlanItemPatch = {
 
 const REP_MIN = 8;
 const REP_MAX = 20;
-const ADD_EXERCISE_MAX_OPTIONS = 500;
 
 const todayIso = () => new Date().toISOString().slice(0, 10);
 const rowKey = (planDate: string, seq: number) => `${planDate}-${seq}`;
-
 const hasKey = (obj: Record<string, any>, key: string) =>
   Object.prototype.hasOwnProperty.call(obj, key);
 
 const clampReps = (v: number) => Math.max(REP_MIN, Math.min(REP_MAX, Math.round(v)));
 const isValidReps = (v: number) => Number.isFinite(v) && v >= REP_MIN && v <= REP_MAX;
 
+function asNumOrBlank(v: string): number | "" {
+  if (v === "") return "";
+  const n = Number(v);
+  return Number.isFinite(n) ? n : "";
+}
+function asIntOrNull(v: number | "" | null | undefined): number | null {
+  if (v === "" || v == null) return null;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return null;
+  return Math.max(0, Math.round(n));
+}
+
 export default function LogPage() {
-  // auth
+  const [mode, setMode] = useState<Mode>("plan");
+
   const [email, setEmail] = useState("");
   const [isAuthed, setIsAuthed] = useState(false);
 
-  // data
-  const [rows, setRows] = useState<PlanRow[]>([]);
+  const [rows, setRows] = useState<Row[]>([]);
   const [exerciseList, setExerciseList] = useState<Exercise[]>([]);
   const [planId, setPlanId] = useState<number | null>(null);
 
-  // UI
   const [msg, setMsg] = useState<string>("");
 
-  // stable session start (per day)
   const [sessionStart, setSessionStart] = useState<string>("");
   const [sessionDurationMin, setSessionDurationMin] = useState<number>(60);
 
-  // debounced timers per plan row
   const autosaveTimers = useRef<Record<string, any>>({});
 
-  // local edits keyed by plan-date + sequence
   const [sets, setSets] = useState<Record<string, number | "">>({});
   const [reps, setReps] = useState<Record<string, number | "">>({});
   const [loads, setLoads] = useState<Record<string, number | "">>({});
-  const [durationsMin, setDurationsMin] = useState<Record<string, number | "">>({}); // cardio minutes UI
+  const [durationsMin, setDurationsMin] = useState<Record<string, number | "">>({});
+  const [caloriesKcal, setCaloriesKcal] = useState<Record<string, number | "">>({});
 
-  // add exercise
   const [addExerciseId, setAddExerciseId] = useState<number | "">("");
   const [addExerciseQuery, setAddExerciseQuery] = useState<string>("");
 
-  // swap
   const [swapPick, setSwapPick] = useState<Record<string, number | "">>({});
 
   const signInMagicLink = async () => {
@@ -115,7 +142,7 @@ export default function LogPage() {
   const loadExerciseList = async () => {
     const { data, error } = await supabase
       .from("exercise")
-      .select("exercise_id, canonical_name, exercise_type")
+      .select("exercise_id, canonical_name, exercise_type, is_manual_only, is_distance_based, is_active")
       .eq("is_active", true)
       .order("canonical_name", { ascending: true });
 
@@ -127,7 +154,6 @@ export default function LogPage() {
   };
 
   const getPersonId = async (): Promise<number | null> => {
-    if (rows.length > 0) return rows[0].person_id;
     const { data, error } = await supabase.rpc("my_person_id");
     if (error) return null;
     const n = Number(data);
@@ -159,17 +185,67 @@ export default function LogPage() {
     return await loadPlanIdForToday();
   };
 
-  const getRowDefaultLoad = (r: PlanRow) => {
+  const getRowDefaultLoad = (r: Row) => {
     const tl = (r as any).target_load_kg;
     if (tl !== undefined && tl !== null) return Number(tl);
     return r.suggested_load_kg ?? null;
   };
 
-  const loadToday = async () => {
+  const exerciseById = useMemo(() => {
+    const m = new Map<number, Exercise>();
+    for (const e of exerciseList) m.set(e.exercise_id, e);
+    return m;
+  }, [exerciseList]);
+
+  const exerciseByName = useMemo(() => {
+    const m = new Map<string, Exercise>();
+    for (const e of exerciseList) m.set(e.canonical_name.trim().toLowerCase(), e);
+    return m;
+  }, [exerciseList]);
+
+  const isDistanceBasedRow = (r: Row) => {
+    if (r.exercise_type !== 2) return false;
+    if (r.exercise_id != null) return !!exerciseById.get(r.exercise_id)?.is_distance_based;
+    return !!exerciseByName.get(r.exercise_name.trim().toLowerCase())?.is_distance_based;
+  };
+
+  const clearLocalEditsForKey = (k: string) => {
+    setLoads((p) => {
+      const n = { ...p };
+      delete n[k];
+      return n;
+    });
+    setReps((p) => {
+      const n = { ...p };
+      delete n[k];
+      return n;
+    });
+    setSets((p) => {
+      const n = { ...p };
+      delete n[k];
+      return n;
+    });
+    setDurationsMin((p) => {
+      const n = { ...p };
+      delete n[k];
+      return n;
+    });
+    setCaloriesKcal((p) => {
+      const n = { ...p };
+      delete n[k];
+      return n;
+    });
+    setSwapPick((p) => {
+      const n = { ...p };
+      delete n[k];
+      return n;
+    });
+  };
+
+  const loadTodayPlanRows = async () => {
     setMsg("");
     const planDate = todayIso();
 
-    // Select * to avoid schema-cache/column mismatch as this view evolves.
     const { data, error } = await supabase
       .from("v_plan_today_edit")
       .select("*")
@@ -181,20 +257,32 @@ export default function LogPage() {
       return;
     }
 
-    const r = (data as PlanRow[]) ?? [];
-    setRows(r);
+    const src = ((data as PlanRowFromView[]) ?? []).map<Row>((r) => ({
+      source: "plan",
+      plan_date: planDate,
+      sequence_no: r.sequence_no,
+      exercise_id: (r as any).exercise_id ?? exerciseByName.get(r.exercise_name.trim().toLowerCase())?.exercise_id ?? null,
+      exercise_name: r.exercise_name,
+      exercise_type: r.exercise_type,
+      target_sets: r.target_sets,
+      target_reps: r.target_reps,
+      target_duration_sec: r.target_duration_sec,
+      suggested_load_kg: r.suggested_load_kg,
+      target_load_kg: (r as any).target_load_kg ?? null,
+    }));
 
-    // also load plan_id (needed for updates/inserts/deletes)
+    setRows(src);
+    setMode("plan");
     void loadPlanIdForToday();
 
-    // seed UI fields from plan values
     const nextSets: Record<string, number | ""> = {};
     const nextReps: Record<string, number | ""> = {};
     const nextLoads: Record<string, number | ""> = {};
     const nextDurMin: Record<string, number | ""> = {};
+    const nextCal: Record<string, number | ""> = {};
 
-    for (const row of r) {
-      const k = rowKey(row.plan_date, row.sequence_no);
+    for (const row of src) {
+      const k = rowKey(planDate, row.sequence_no);
 
       if (row.exercise_type === 1) {
         nextSets[k] = row.target_sets ?? 3;
@@ -204,6 +292,7 @@ export default function LogPage() {
       } else {
         const mins = row.target_duration_sec != null ? Math.round(row.target_duration_sec / 60) : 0;
         nextDurMin[k] = mins;
+        if (isDistanceBasedRow(row)) nextCal[k] = "";
       }
     }
 
@@ -211,31 +300,39 @@ export default function LogPage() {
     setReps(nextReps);
     setLoads(nextLoads);
     setDurationsMin(nextDurMin);
+    setCaloriesKcal(nextCal);
+  };
+
+  const startAdhocWorkout = () => {
+    setMsg("Ad-hoc workout: add exercises below.");
+    setMode("adhoc");
+    setRows([]);
+    setPlanId(null);
+    setSets({});
+    setReps({});
+    setLoads({});
+    setDurationsMin({});
+    setCaloriesKcal({});
+    setSwapPick({});
   };
 
   const refreshPlan = async () => {
     setMsg("");
-    const p_start_date = todayIso();
-    const p_days = 1;
-
-    // wrapper: public.generate_plan(p_days int, p_start_date date)
-    const { data, error } = await supabase.rpc("generate_plan", { p_days, p_start_date });
+    const { error } = await supabase.rpc("generate_plan", {
+      p_days: 1,
+      p_start_date: todayIso(),
+    });
     if (error) {
       setMsg(error.message);
       return;
     }
-
-    // sometimes the function returns a plan_id; use it if present
-    if (data != null) {
-      const n = Number(data);
-      if (Number.isFinite(n)) setPlanId(n);
-    }
-
-    await loadToday();
+    await loadTodayPlanRows();
     setMsg("Plan refreshed.");
   };
 
   const queueAutosave = (sequence_no: number, patch: PlanItemPatch) => {
+    if (mode !== "plan") return;
+
     const planDate = todayIso();
     const k = rowKey(planDate, sequence_no);
 
@@ -260,9 +357,48 @@ export default function LogPage() {
     }, 500);
   };
 
-  const addExerciseToPlan = async () => {
+  const addExercise = async () => {
     setMsg("");
     if (addExerciseId === "") return;
+
+    const ex = exerciseById.get(Number(addExerciseId));
+    if (!ex) return;
+
+    const planDate = todayIso();
+    const maxSeq = rows.reduce((m, r) => Math.max(m, r.sequence_no), 0);
+    const newSeq = maxSeq > 0 ? maxSeq + 10 : 10;
+    const k = rowKey(planDate, newSeq);
+
+    if (mode === "adhoc") {
+      setRows((prev) => [
+        ...prev,
+        {
+          source: "adhoc",
+          plan_date: planDate,
+          sequence_no: newSeq,
+          exercise_id: ex.exercise_id,
+          exercise_name: ex.canonical_name,
+          exercise_type: ex.exercise_type,
+          target_sets: ex.exercise_type === 1 ? 3 : null,
+          target_reps: ex.exercise_type === 1 ? 10 : null,
+          target_duration_sec: ex.exercise_type === 2 ? 8 * 60 : null,
+          suggested_load_kg: null,
+        },
+      ]);
+
+      if (ex.exercise_type === 1) {
+        setSets((p) => ({ ...p, [k]: 3 }));
+        setReps((p) => ({ ...p, [k]: 10 }));
+        setLoads((p) => ({ ...p, [k]: "" }));
+      } else {
+        setDurationsMin((p) => ({ ...p, [k]: 8 }));
+        if (ex.is_distance_based) setCaloriesKcal((p) => ({ ...p, [k]: "" }));
+      }
+
+      setAddExerciseId("");
+      setMsg("Added (ad-hoc).");
+      return;
+    }
 
     const pid = await requirePlanId();
     if (!pid) {
@@ -270,17 +406,6 @@ export default function LogPage() {
       return;
     }
 
-    const ex = exerciseList.find((x) => x.exercise_id === Number(addExerciseId));
-    if (!ex) {
-      setMsg("Exercise not found.");
-      return;
-    }
-
-    const maxSeq = rows.reduce((m, r) => Math.max(m, r.sequence_no), 0);
-    const newSeq = maxSeq + 10;
-
-    // IMPORTANT: workout_plan_item does NOT have exercise_name/exercise_type/plan_date.
-    // It needs plan_id + sequence_no + exercise_id, plus NOT NULL targets.
     const insertRow: any = {
       plan_id: pid,
       sequence_no: newSeq,
@@ -290,10 +415,7 @@ export default function LogPage() {
       target_load_kg: null,
       target_duration_sec: null,
     };
-
-    if (ex.exercise_type === 2) {
-      insertRow.target_duration_sec = 8 * 60; // default 8 min
-    }
+    if (ex.exercise_type === 2) insertRow.target_duration_sec = 8 * 60;
 
     const { error } = await supabase.from("workout_plan_item").insert(insertRow);
     if (error) {
@@ -302,12 +424,21 @@ export default function LogPage() {
     }
 
     setAddExerciseId("");
-    await loadToday();
+    await loadTodayPlanRows();
     setMsg("Exercise added.");
   };
 
-  const removeExercise = async (sequence_no: number) => {
+  const removeRow = async (sequence_no: number) => {
     setMsg("");
+    const k = rowKey(todayIso(), sequence_no);
+
+    if (mode === "adhoc") {
+      setRows((prev) => prev.filter((r) => r.sequence_no !== sequence_no));
+      clearLocalEditsForKey(k);
+      setMsg("Removed.");
+      return;
+    }
+
     const pid = await requirePlanId();
     if (!pid) {
       setMsg("No plan loaded. Click Refresh plan.");
@@ -325,25 +456,45 @@ export default function LogPage() {
       return;
     }
 
-    await loadToday();
+    await loadTodayPlanRows();
     setMsg("Removed.");
   };
 
   const replaceExercise = async (sequence_no: number, newExerciseId: number) => {
     setMsg("");
+    const k = rowKey(todayIso(), sequence_no);
+
+    const ex = exerciseById.get(newExerciseId);
+    if (!ex) return;
+
+    if (mode === "adhoc") {
+      setRows((prev) =>
+        prev.map((r) =>
+          r.sequence_no === sequence_no
+            ? {
+                ...r,
+                exercise_id: ex.exercise_id,
+                exercise_name: ex.canonical_name,
+                exercise_type: ex.exercise_type,
+                target_sets: ex.exercise_type === 1 ? 3 : null,
+                target_reps: ex.exercise_type === 1 ? 10 : null,
+                target_duration_sec: ex.exercise_type === 2 ? 8 * 60 : null,
+              }
+            : r
+        )
+      );
+      clearLocalEditsForKey(k);
+      if (ex.exercise_type === 2 && ex.is_distance_based) setCaloriesKcal((p) => ({ ...p, [k]: "" }));
+      setMsg("Swapped.");
+      return;
+    }
+
     const pid = await requirePlanId();
     if (!pid) {
       setMsg("No plan loaded. Click Refresh plan.");
       return;
     }
 
-    const ex = exerciseList.find((x) => x.exercise_id === newExerciseId);
-    if (!ex) {
-      setMsg("Exercise not found.");
-      return;
-    }
-
-    // Keep NOT NULL columns valid. For cardio rows, sets/reps can stay defaulted.
     const patch: PlanItemPatch = {
       exercise_id: ex.exercise_id,
       target_sets: 3,
@@ -358,35 +509,10 @@ export default function LogPage() {
       .eq("plan_id", pid)
       .eq("sequence_no", sequence_no);
 
-    if (error) {
-      setMsg(error.message);
-      return;
-    }
+    if (error) setMsg(error.message);
 
-    // clear local edits for this slot (otherwise old values stick)
-    const sk = rowKey(todayIso(), sequence_no);
-    setLoads((p) => {
-      const n = { ...p };
-      delete n[sk];
-      return n;
-    });
-    setReps((p) => {
-      const n = { ...p };
-      delete n[sk];
-      return n;
-    });
-    setSets((p) => {
-      const n = { ...p };
-      delete n[sk];
-      return n;
-    });
-    setDurationsMin((p) => {
-      const n = { ...p };
-      delete n[sk];
-      return n;
-    });
-
-    await loadToday();
+    clearLocalEditsForKey(k);
+    await loadTodayPlanRows();
     setMsg("Swapped.");
   };
 
@@ -399,66 +525,75 @@ export default function LogPage() {
 
       if (r.exercise_type === 2) {
         const defaultMins = Math.round((r.target_duration_sec ?? 0) / 60);
-        const minsRaw = hasKey(durationsMin, k) ? durationsMin[k] : defaultMins;
-        const mins = minsRaw === "" ? defaultMins : Number(minsRaw);
+        const mins = (hasKey(durationsMin, k) ? durationsMin[k] : defaultMins) as number | "";
+        const minutes = mins === "" ? defaultMins : Number(mins);
+        const duration_sec = Math.max(0, Math.round(minutes * 60));
+
+        const cardioSet: CardioSet = { duration_sec };
+
+        if (isDistanceBasedRow(r)) {
+          const cal = hasKey(caloriesKcal, k) ? caloriesKcal[k] : "";
+          cardioSet.calories_kcal = asIntOrNull(cal);
+        }
 
         out.push({
           sequence_no: r.sequence_no,
+          kind: "cardio",
           name: r.exercise_name,
-          duration_sec: Math.max(0, Math.round(mins * 60)),
+          sets: [cardioSet],
         });
         continue;
       }
 
       const defaultSets = r.target_sets ?? 3;
       const defaultReps = r.target_reps ?? 10;
-      const defaultLoad = getRowDefaultLoad(r); // number | null
+      const defaultLoad = getRowDefaultLoad(r);
 
-      const setRaw = hasKey(sets, k) ? sets[k] : defaultSets;
-      const setCount = setRaw === "" ? defaultSets : Number(setRaw);
+      const setCount = (hasKey(sets, k) ? sets[k] : defaultSets) as number | "";
+      const repsVal = (hasKey(reps, k) ? reps[k] : defaultReps) as number | "";
+      const loadVal = (hasKey(loads, k) ? loads[k] : (defaultLoad ?? "")) as number | "";
 
-      const repRaw = hasKey(reps, k) ? reps[k] : defaultReps;
-      const repNum = repRaw === "" ? defaultReps : Number(repRaw);
+      const s = setCount === "" ? defaultSets : Number(setCount);
+      const repNum = repsVal === "" ? defaultReps : Number(repsVal);
       const rep = clampReps(repNum);
 
-      const loadRaw = hasKey(loads, k) ? loads[k] : defaultLoad;
-      const load =
-        loadRaw == null || loadRaw == "" || Number.isNaN(Number(loadRaw)) ? null : Number(loadRaw);
+      const load = loadVal === "" ? null : Number(loadVal);
+      const load_kg = load == null || Number.isNaN(load) ? null : load;
 
       const setsArr: StrengthSet[] = [];
-      for (let i = 0; i < Math.max(1, Math.round(setCount)); i++) {
-        setsArr.push({ reps: rep, load_kg: load });
+      for (let i = 0; i < Math.max(1, Math.round(s)); i++) {
+        setsArr.push({ reps: rep, load_kg });
       }
 
-      out.push({ sequence_no: r.sequence_no, name: r.exercise_name, sets: setsArr });
+      out.push({
+        sequence_no: r.sequence_no,
+        kind: "strength",
+        name: r.exercise_name,
+        sets: setsArr,
+      });
     }
 
     return out;
-  }, [rows, sets, reps, loads, durationsMin]);
+  }, [rows, sets, reps, loads, durationsMin, caloriesKcal, exerciseList]);
 
   const saveSession = async () => {
     setMsg("");
 
-    // Always have a stable session_start
     let ss = sessionStart;
     if (!ss) ss = ensureSessionStart();
 
-    // reps validation (strength only)
     for (const r of rows) {
       if (r.exercise_type !== 1) continue;
       const k = rowKey(todayIso(), r.sequence_no);
-
       const defaultReps = r.target_reps ?? 10;
       const repRaw = hasKey(reps, k) ? reps[k] : defaultReps;
       const repNum = repRaw === "" ? defaultReps : Number(repRaw);
-
       if (!isValidReps(repNum)) {
         setMsg(`Reps out of range for "${r.exercise_name}" (must be ${REP_MIN}-${REP_MAX}).`);
         return;
       }
     }
 
-    // DB signature: (p_session_start timestamptz, p_duration_min smallint, p_rows jsonb)
     const { error } = await supabase.rpc("log_session_json", {
       p_session_start: ss,
       p_duration_min: sessionDurationMin,
@@ -468,7 +603,6 @@ export default function LogPage() {
     setMsg(error ? error.message : "Session saved.");
   };
 
-  // init auth + stable session start
   useEffect(() => {
     (async () => {
       const { data } = await supabase.auth.getSession();
@@ -479,20 +613,18 @@ export default function LogPage() {
     const { data: sub } = supabase.auth.onAuthStateChange((_evt, session) => {
       setIsAuthed(!!session);
       if (session) ensureSessionStart();
+      else setRows([]);
     });
 
-    return () => {
-      sub.subscription.unsubscribe();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    return () => sub.subscription.unsubscribe();
   }, []);
 
-  // initial loads
   useEffect(() => {
     if (!isAuthed) return;
-    void loadExerciseList();
-    void loadToday();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    (async () => {
+      await loadExerciseList();
+      await loadTodayPlanRows();
+    })();
   }, [isAuthed]);
 
   const filteredAddExercises = useMemo(() => {
@@ -501,13 +633,6 @@ export default function LogPage() {
     return exerciseList.filter((e) => e.canonical_name.toLowerCase().includes(q));
   }, [exerciseList, addExerciseQuery]);
 
-  const addExerciseOptions = useMemo(() => {
-    return filteredAddExercises.slice(0, ADD_EXERCISE_MAX_OPTIONS);
-  }, [filteredAddExercises]);
-
-  const swapOptions = useMemo(() => exerciseList.slice(0, 1000), [exerciseList]);
-
-  // Styles
   const th: React.CSSProperties = { textAlign: "left", padding: "10px 8px", borderBottom: "1px solid #333" };
   const td: React.CSSProperties = { padding: "10px 8px", borderBottom: "1px solid #222", verticalAlign: "top" };
 
@@ -535,17 +660,21 @@ export default function LogPage() {
   return (
     <main style={{ padding: 20, maxWidth: 1100, margin: "0 auto" }}>
       <h1 style={{ marginBottom: 8 }}>Log session</h1>
+
       <div style={{ color: "#666", marginBottom: 12 }}>
-        Plan date: <b>{todayIso()}</b> · Plan ID: <b>{planId ?? "(unknown)"}</b> · Session start:{" "}
-        <b>{sessionStart || "(not set)"}</b>
+        Date: <b>{todayIso()}</b> · Mode: <b>{mode === "plan" ? "Plan" : "Ad-hoc"}</b> · Plan ID:{" "}
+        <b>{planId ?? "(none)"}</b> · Session start: <b>{sessionStart || "(not set)"}</b>
       </div>
 
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginBottom: 14 }}>
+        <button onClick={loadTodayPlanRows} style={{ padding: "10px 14px" }}>
+          Load Today&apos;s Plan
+        </button>
+        <button onClick={startAdhocWorkout} style={{ padding: "10px 14px" }}>
+          New Ad-hoc Workout
+        </button>
         <button onClick={refreshPlan} style={{ padding: "10px 14px" }}>
           Refresh plan
-        </button>
-        <button onClick={loadToday} style={{ padding: "10px 14px" }}>
-          Reload
         </button>
         <button onClick={newSession} style={{ padding: "10px 14px" }}>
           New session
@@ -566,7 +695,7 @@ export default function LogPage() {
         </button>
       </div>
 
-      {msg && <div style={{ marginBottom: 14, color: msg === "Session saved." ? "#0a7a0a" : "#b00020" }}>{msg}</div>}
+      {msg && <div style={{ marginBottom: 14 }}>{msg}</div>}
 
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginBottom: 14 }}>
         <input
@@ -582,37 +711,18 @@ export default function LogPage() {
           style={{ padding: 10, minWidth: 320 }}
         >
           <option value="">Select exercise…</option>
-          {addExerciseOptions.map((e) => (
+          {filteredAddExercises.map((e) => (
             <option key={e.exercise_id} value={e.exercise_id}>
               {e.canonical_name}
+              {e.is_manual_only ? " (manual)" : ""}
+              {e.is_distance_based ? " (distance)" : ""}
             </option>
           ))}
         </select>
 
-        <button onClick={addExerciseToPlan} style={{ padding: "10px 14px" }}>
+        <button onClick={addExercise} style={{ padding: "10px 14px" }}>
           Add
         </button>
-
-        <a
-          href="/exercises/new"
-          style={{
-            padding: "10px 14px",
-            border: "1px solid #888",
-            borderRadius: 8,
-            textDecoration: "none",
-            color: "#111",
-            background: "#eee",
-            display: "inline-block",
-          }}
-        >
-          New strength exercise
-        </a>
-
-        {filteredAddExercises.length > ADD_EXERCISE_MAX_OPTIONS && (
-          <span style={{ color: "#b00020" }}>
-            Too many matches ({filteredAddExercises.length}). Add more text to filter.
-          </span>
-        )}
       </div>
 
       <div style={{ overflowX: "auto" }}>
@@ -626,17 +736,19 @@ export default function LogPage() {
           </thead>
           <tbody>
             {rows.map((r) => {
-              const planDate = todayIso();
-              const k = rowKey(planDate, r.sequence_no);
+              const k = rowKey(todayIso(), r.sequence_no);
 
-              const showSets = hasKey(sets, k) ? sets[k] : (r.target_sets ?? 3);
-              const showReps = hasKey(reps, k) ? reps[k] : (r.target_reps ?? 10);
+              const showSets = (hasKey(sets, k) ? sets[k] : (r.target_sets ?? 3)) as number | "";
+              const showReps = (hasKey(reps, k) ? reps[k] : (r.target_reps ?? 10)) as number | "";
 
               const defaultLoad = getRowDefaultLoad(r);
-              const showLoad = hasKey(loads, k) ? loads[k] : (defaultLoad ?? "");
+              const showLoad = (hasKey(loads, k) ? loads[k] : (defaultLoad ?? "")) as number | "";
 
               const targetMin = r.target_duration_sec != null ? Math.round(r.target_duration_sec / 60) : 0;
-              const showMin = hasKey(durationsMin, k) ? durationsMin[k] : targetMin;
+              const showMin = (hasKey(durationsMin, k) ? durationsMin[k] : targetMin) as number | "";
+
+              const showCalories = (hasKey(caloriesKcal, k) ? caloriesKcal[k] : "") as number | "";
+              const showCaloriesField = isDistanceBasedRow(r);
 
               return (
                 <tr key={k}>
@@ -654,9 +766,9 @@ export default function LogPage() {
                             max={REP_MAX}
                             value={showReps as any}
                             onChange={(e) => {
-                              const raw = e.target.value === "" ? "" : Number(e.target.value);
+                              const raw = asNumOrBlank(e.target.value);
                               setReps((prev) => ({ ...prev, [k]: raw }));
-                              if (raw !== "") queueAutosave(r.sequence_no, { target_reps: clampReps(raw) });
+                              if (raw !== "" && mode === "plan") queueAutosave(r.sequence_no, { target_reps: clampReps(raw) });
                             }}
                             style={{ width: 90, marginLeft: 6, padding: 6 }}
                           />
@@ -668,9 +780,9 @@ export default function LogPage() {
                             type="number"
                             value={showLoad as any}
                             onChange={(e) => {
-                              const v = e.target.value === "" ? "" : Number(e.target.value);
+                              const v = asNumOrBlank(e.target.value);
                               setLoads((prev) => ({ ...prev, [k]: v }));
-                              if (v !== "") queueAutosave(r.sequence_no, { target_load_kg: v });
+                              if (v !== "" && mode === "plan") queueAutosave(r.sequence_no, { target_load_kg: v });
                             }}
                             style={{ width: 110, marginLeft: 6, padding: 6 }}
                           />
@@ -682,9 +794,9 @@ export default function LogPage() {
                             type="number"
                             value={showSets as any}
                             onChange={(e) => {
-                              const v = e.target.value === "" ? "" : Number(e.target.value);
+                              const v = asNumOrBlank(e.target.value);
                               setSets((prev) => ({ ...prev, [k]: v }));
-                              if (v !== "") queueAutosave(r.sequence_no, { target_sets: Math.max(1, Math.round(v)) });
+                              if (v !== "" && mode === "plan") queueAutosave(r.sequence_no, { target_sets: Math.max(1, Math.round(v)) });
                             }}
                             style={{ width: 70, marginLeft: 6, padding: 6 }}
                           />
@@ -693,19 +805,43 @@ export default function LogPage() {
                     )}
 
                     {r.exercise_type === 2 && (
-                      <div style={{ marginTop: 10 }}>
-                        Target: <b>{targetMin} min</b> · Duration (min):{" "}
-                        <input
-                          type="number"
-                          min={0}
-                          value={showMin as any}
-                          onChange={(e) => {
-                            const v = e.target.value === "" ? "" : Number(e.target.value);
-                            setDurationsMin((prev) => ({ ...prev, [k]: v }));
-                            if (v !== "") queueAutosave(r.sequence_no, { target_duration_sec: Math.max(0, Math.round(v * 60)) });
-                          }}
-                          style={{ width: 90, marginLeft: 6, padding: 6 }}
-                        />
+                      <div style={{ marginTop: 10, display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+                        <div>
+                          Target: <b>{targetMin} min</b>
+                        </div>
+
+                        <label>
+                          Duration (min):
+                          <input
+                            type="number"
+                            min={0}
+                            value={showMin as any}
+                            onChange={(e) => {
+                              const v = asNumOrBlank(e.target.value);
+                              setDurationsMin((prev) => ({ ...prev, [k]: v }));
+                              if (v !== "" && mode === "plan") {
+                                queueAutosave(r.sequence_no, { target_duration_sec: Math.max(0, Math.round(v * 60)) });
+                              }
+                            }}
+                            style={{ width: 90, marginLeft: 6, padding: 6 }}
+                          />
+                        </label>
+
+                        {showCaloriesField && (
+                          <label>
+                            Calories (kcal):
+                            <input
+                              type="number"
+                              min={0}
+                              value={showCalories as any}
+                              onChange={(e) => {
+                                const v = asNumOrBlank(e.target.value);
+                                setCaloriesKcal((prev) => ({ ...prev, [k]: v }));
+                              }}
+                              style={{ width: 120, marginLeft: 6, padding: 6 }}
+                            />
+                          </label>
+                        )}
                       </div>
                     )}
                   </td>
@@ -725,14 +861,16 @@ export default function LogPage() {
                         style={{ padding: 10, minWidth: 220 }}
                       >
                         <option value="">Swap…</option>
-                        {swapOptions.map((e) => (
+                        {exerciseList.map((e) => (
                           <option key={e.exercise_id} value={e.exercise_id}>
                             {e.canonical_name}
+                            {e.is_manual_only ? " (manual)" : ""}
+                            {e.is_distance_based ? " (distance)" : ""}
                           </option>
                         ))}
                       </select>
 
-                      <button onClick={() => void removeExercise(r.sequence_no)} style={{ padding: "10px 14px" }}>
+                      <button onClick={() => void removeRow(r.sequence_no)} style={{ padding: "10px 14px" }}>
                         Remove
                       </button>
                     </div>
@@ -744,7 +882,7 @@ export default function LogPage() {
             {rows.length === 0 && (
               <tr>
                 <td style={td} colSpan={3}>
-                  No rows. Click <b>Refresh plan</b>.
+                  No rows. Use <b>Add</b> to build your workout.
                 </td>
               </tr>
             )}

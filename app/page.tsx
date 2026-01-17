@@ -50,7 +50,7 @@ export default function HomePage() {
     setMsg("");
     const { error } = await supabase.auth.signInWithOtp({
       email,
-      options: { emailRedirectTo: window.location.origin }, // <-- THIS drives localhost redirect
+      options: { emailRedirectTo: window.location.origin }, // drives localhost redirect
     });
     setMsg(error ? error.message : "Magic link sent. Check your email.");
   };
@@ -73,6 +73,20 @@ export default function HomePage() {
     });
 
     setMsg(error ? error.message : "Plan generated.");
+    if (!error) await loadToday();
+  };
+
+  const generateEmptyPlan = async () => {
+    setMsg("");
+    const startDate = isoDate(new Date());
+    const days = 5;
+
+    const { error } = await supabase.rpc("generate_empty_plan", {
+      p_start_date: startDate,
+      p_days: days,
+    });
+
+    setMsg(error ? error.message : "Empty plan created.");
     if (!error) await loadToday();
   };
 
@@ -125,6 +139,9 @@ export default function HomePage() {
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <button onClick={generatePlan} style={{ padding: 10 }}>
             Generate / Regenerate
+          </button>
+          <button onClick={generateEmptyPlan} style={{ padding: 10 }}>
+            Generate Empty Plan
           </button>
           <button onClick={loadToday} style={{ padding: 10 }}>
             Refresh
