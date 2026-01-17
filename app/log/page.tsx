@@ -62,6 +62,7 @@ const REP_MAX = 20;
 
 const todayIso = () => new Date().toISOString().slice(0, 10);
 const rowKey = (planDate: string, seq: number) => `${planDate}-${seq}`;
+const normName = (s: string) => (s ?? "").trim().toLowerCase();
 
 /**
  * Controlled numeric inputs in React + type="number" can make it painful to clear.
@@ -168,10 +169,23 @@ export default function LogPage() {
     return m;
   }, [exerciseList]);
 
+  // ✅ NEW: also index by canonical_name, so we can recover flags even if exercise_id is missing in the plan view
+  const exerciseByName = useMemo(() => {
+    const m = new Map<string, Exercise>();
+    for (const e of exerciseList) m.set(normName(e.canonical_name), e);
+    return m;
+  }, [exerciseList]);
+
+  // ✅ UPDATED: distance-based check falls back to name if exercise_id is null
   const isDistanceBasedRow = (r: Row) => {
     if (r.exercise_type !== 2) return false;
-    if (r.exercise_id == null) return false;
-    return !!exerciseById.get(r.exercise_id)?.is_distance_based;
+
+    if (r.exercise_id != null) {
+      return !!exerciseById.get(r.exercise_id)?.is_distance_based;
+    }
+
+    const byName = exerciseByName.get(normName(r.exercise_name));
+    return !!byName?.is_distance_based;
   };
 
   const getPersonId = async (): Promise<number | null> => {
@@ -260,19 +274,24 @@ export default function LogPage() {
       return;
     }
 
-    const src = ((data as PlanRowFromView[]) ?? []).map<Row>((r) => ({
-      source: "plan",
-      plan_date: planDate,
-      sequence_no: r.sequence_no,
-      exercise_id: r.exercise_id ?? null,
-      exercise_name: r.exercise_name,
-      exercise_type: r.exercise_type,
-      target_sets: r.target_sets,
-      target_reps: r.target_reps,
-      target_duration_sec: r.target_duration_sec,
-      suggested_load_kg: r.suggested_load_kg,
-      target_load_kg: r.target_load_kg ?? null,
-    }));
+    // ✅ UPDATED: if exercise_id is missing from the view, recover it by name
+    const src = ((data as PlanRowFromView[]) ?? []).map<Row>((r) => {
+      const recoveredId = r.exercise_id ?? exerciseByName.get(normName(r.exercise_name))?.exercise_id ?? null;
+
+      return {
+        source: "plan",
+        plan_date: planDate,
+        sequence_no: r.sequence_no,
+        exercise_id: recoveredId,
+        exercise_name: r.exercise_name,
+        exercise_type: r.exercise_type,
+        target_sets: r.target_sets,
+        target_reps: r.target_reps,
+        target_duration_sec: r.target_duration_sec,
+        suggested_load_kg: r.suggested_load_kg,
+        target_load_kg: r.target_load_kg ?? null,
+      };
+    });
 
     setRows(src);
     setMode("plan");
@@ -576,7 +595,7 @@ export default function LogPage() {
     }
 
     return out;
-  }, [rows, sets, reps, loads, durationsMin, caloriesKcal, exerciseById]);
+  }, [rows, sets, reps, loads, durationsMin, caloriesKcal, exerciseById, exerciseByName]);
 
   const saveSession = async () => {
     setMsg("");
@@ -776,7 +795,8 @@ export default function LogPage() {
                             onChange={(e) => {
                               const raw = parseNumberOrBlank(e.target.value);
                               setReps((prev) => ({ ...prev, [k]: raw }));
-                              if (raw !== "" && mode === "plan") queueAutosave(r.sequence_no, { target_reps: clampReps(raw) });
+                              if (raw !== "" && mode === "plan")
+                                queueAutosave(r.sequence_no, { target_reps: clampReps(raw) });
                             }}
                             style={{ width: 90, marginLeft: 6, padding: 6 }}
                           />
@@ -806,7 +826,8 @@ export default function LogPage() {
                             onChange={(e) => {
                               const v = parseNumberOrBlank(e.target.value);
                               setSets((prev) => ({ ...prev, [k]: v }));
-                              if (v !== "" && mode === "plan") queueAutosave(r.sequence_no, { target_sets: Math.max(1, Math.round(v)) });
+                              if (v !== "" && mode === "plan")
+                                queueAutosave(r.sequence_no, { target_sets: Math.max(1, Math.round(v)) });
                             }}
                             style={{ width: 70, marginLeft: 6, padding: 6 }}
                           />
@@ -829,7 +850,8 @@ export default function LogPage() {
                             onChange={(e) => {
                               const v = parseNumberOrBlank(e.target.value);
                               setDurationsMin((prev) => ({ ...prev, [k]: v }));
-                              if (v !== "" && mode === "plan") queueAutosave(r.sequence_no, { target_duration_sec: Math.max(0, Math.round(v * 60)) });
+                              if (v !== "" && mode === "plan")
+                                queueAutosave(r.sequence_no, { target_duration_sec: Math.max(0, Math.round(v * 60)) });
                               if (v === "" && mode === "plan") queueAutosave(r.sequence_no, { target_duration_sec: 0 });
                             }}
                             style={{ width: 90, marginLeft: 6, padding: 6 }}
