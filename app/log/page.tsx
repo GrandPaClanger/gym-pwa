@@ -261,7 +261,10 @@ export default function LogPage() {
       source: "plan",
       plan_date: planDate,
       sequence_no: r.sequence_no,
-      exercise_id: (r as any).exercise_id ?? exerciseByName.get(r.exercise_name.trim().toLowerCase())?.exercise_id ?? null,
+      exercise_id:
+        (r as any).exercise_id ??
+        exerciseByName.get(r.exercise_name.trim().toLowerCase())?.exercise_id ??
+        null,
       exercise_name: r.exercise_name,
       exercise_type: r.exercise_type,
       target_sets: r.target_sets,
@@ -661,6 +664,11 @@ export default function LogPage() {
     <main style={{ padding: 20, maxWidth: 1100, margin: "0 auto" }}>
       <h1 style={{ marginBottom: 8 }}>Log session</h1>
 
+      {/* DEBUG: shows whether exercises are loading + which Supabase URL the build is using */}
+      <div style={{ color: "#999", marginBottom: 10 }}>
+        EX COUNT: {exerciseList.length} · URL: {process.env.NEXT_PUBLIC_SUPABASE_URL}
+      </div>
+
       <div style={{ color: "#666", marginBottom: 12 }}>
         Date: <b>{todayIso()}</b> · Mode: <b>{mode === "plan" ? "Plan" : "Ad-hoc"}</b> · Plan ID:{" "}
         <b>{planId ?? "(none)"}</b> · Session start: <b>{sessionStart || "(not set)"}</b>
@@ -768,7 +776,8 @@ export default function LogPage() {
                             onChange={(e) => {
                               const raw = asNumOrBlank(e.target.value);
                               setReps((prev) => ({ ...prev, [k]: raw }));
-                              if (raw !== "" && mode === "plan") queueAutosave(r.sequence_no, { target_reps: clampReps(raw) });
+                              if (raw !== "" && mode === "plan")
+                                queueAutosave(r.sequence_no, { target_reps: clampReps(raw) });
                             }}
                             style={{ width: 90, marginLeft: 6, padding: 6 }}
                           />
@@ -796,7 +805,8 @@ export default function LogPage() {
                             onChange={(e) => {
                               const v = asNumOrBlank(e.target.value);
                               setSets((prev) => ({ ...prev, [k]: v }));
-                              if (v !== "" && mode === "plan") queueAutosave(r.sequence_no, { target_sets: Math.max(1, Math.round(v)) });
+                              if (v !== "" && mode === "plan")
+                                queueAutosave(r.sequence_no, { target_sets: Math.max(1, Math.round(v)) });
                             }}
                             style={{ width: 70, marginLeft: 6, padding: 6 }}
                           />
