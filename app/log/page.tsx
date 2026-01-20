@@ -93,6 +93,7 @@ export default function LogPage() {
 
   const [email, setEmail] = useState("");
   const [isAuthed, setIsAuthed] = useState(false);
+  const [authReady, setAuthReady] = useState(false);
 
   const [rows, setRows] = useState<Row[]>([]);
   const [exerciseList, setExerciseList] = useState<Exercise[]>([]);
@@ -118,16 +119,17 @@ export default function LogPage() {
   const [swapPick, setSwapPick] = useState<Record<string, number | "">>({});
 
   const signInMagicLink = async () => {
-  setMsg("");
+    setMsg("");
 
-  const { error } = await supabase.auth.signInWithOtp({
-  email,
-  options: { emailRedirectTo: `${window.location.origin}/` },
-});
+    const { error } = await supabase.auth.signInWithOtp({
+      email,
+      options: {
+        emailRedirectTo: `${window.location.origin}/`,
+      },
+    });
 
-  setMsg(error ? error.message : "Check your email for the magic link.");
-};
-
+    setMsg(error ? error.message : "Check your email for the magic link.");
+  };
 
   const sessionKeyForToday = () => `gym.session_start.${todayIso()}`;
 
@@ -592,11 +594,13 @@ export default function LogPage() {
     (async () => {
       const { data } = await supabase.auth.getSession();
       setIsAuthed(!!data.session);
+      setAuthReady(true);
       if (data.session) ensureSessionStart();
     })();
 
     const { data: sub } = supabase.auth.onAuthStateChange((_evt, session) => {
       setIsAuthed(!!session);
+      setAuthReady(true);
       if (session) ensureSessionStart();
       else setRows([]);
     });
@@ -621,6 +625,15 @@ export default function LogPage() {
 
   const th: React.CSSProperties = { textAlign: "left", padding: "10px 8px", borderBottom: "1px solid #333" };
   const td: React.CSSProperties = { padding: "10px 8px", borderBottom: "1px solid #222", verticalAlign: "top" };
+
+  if (!authReady) {
+    return (
+      <main style={{ padding: 20, maxWidth: 900, margin: "0 auto" }}>
+        <h1>Log session</h1>
+        <p>Checking sign-in…</p>
+      </main>
+    );
+  }
 
   if (!isAuthed) {
     return (

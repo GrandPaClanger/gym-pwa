@@ -8,7 +8,6 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
     persistSession: true,
     autoRefreshToken: true,
     detectSessionInUrl: true,
-    // IMPORTANT: do NOT set flowType: "pkce"
     storageKey: "gym-pwa-auth",
   },
 });
