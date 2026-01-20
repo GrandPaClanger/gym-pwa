@@ -1,5 +1,7 @@
 "use client";
 
+import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
 
@@ -32,12 +34,13 @@ function targetText(r: TodayRow) {
 }
 
 export default function HomePage() {
+  const router = useRouter();
+
   const [isAuthed, setIsAuthed] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
 
   const [msg, setMsg] = useState("");
   const [loading, setLoading] = useState(true);
-
   const [rows, setRows] = useState<TodayRow[]>([]);
 
   const checkIsAdmin = async () => {
@@ -48,9 +51,7 @@ export default function HomePage() {
   const loadToday = async () => {
     setMsg("");
     setLoading(true);
-
     try {
-      // IMPORTANT: use the same view as /log so behaviour matches.
       const { data, error } = await supabase
         .from("v_plan_today_edit")
         .select(
@@ -73,28 +74,22 @@ export default function HomePage() {
 
   const generateRegenerate = async () => {
     setMsg("");
-
     const { error } = await supabase.rpc("generate_plan_days", {
       p_start_date: todayIso(),
       p_days: 1,
       p_cooldown_days: 10,
     });
-
     if (error) return setMsg(error.message);
-
     await loadToday();
     setMsg("Plan generated.");
   };
 
   const generateEmptyPlan = async () => {
     setMsg("");
-
     const { error } = await supabase.rpc("generate_empty_plan", {
       p_plan_date: todayIso(),
     });
-
     if (error) return setMsg(error.message);
-
     await loadToday();
     setMsg("Empty plan generated.");
   };
@@ -109,34 +104,40 @@ export default function HomePage() {
     setIsAdmin(false);
     setRows([]);
     setMsg("");
+    router.push("/log");
   };
 
   useEffect(() => {
     (async () => {
       const { data } = await supabase.auth.getSession();
       const ok = !!data.session;
+
       setIsAuthed(ok);
 
-      if (ok) {
-        await checkIsAdmin();
-        await loadToday();
-      } else {
+      if (!ok) {
         setLoading(false);
+        router.replace("/log"); // <-- key
+        return;
       }
+
+      await checkIsAdmin();
+      await loadToday();
     })();
 
     const { data: sub } = supabase.auth.onAuthStateChange(async (_evt, session) => {
       const ok = !!session;
       setIsAuthed(ok);
 
-      if (ok) {
-        await checkIsAdmin();
-        await loadToday();
-      } else {
+      if (!ok) {
         setIsAdmin(false);
         setRows([]);
         setMsg("");
+        router.replace("/log");
+        return;
       }
+
+      await checkIsAdmin();
+      await loadToday();
     });
 
     return () => sub.subscription.unsubscribe();
@@ -160,8 +161,8 @@ export default function HomePage() {
 
       <div style={{ textAlign: "center", marginBottom: 14 }}>
         <div style={{ marginTop: 10, display: "flex", gap: 14, justifyContent: "center", flexWrap: "wrap" }}>
-          <a href="/log">Go to Log Session →</a>
-          {isAdmin && <a href="/admin/exercises">Admin: Exercise Maintenance →</a>}
+          <Link href="/log">Go to Log Session →</Link>
+          {isAdmin && <Link href="/admin/exercises">Admin: Exercise Maintenance →</Link>}
         </div>
       </div>
 

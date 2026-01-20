@@ -118,10 +118,18 @@ export default function LogPage() {
   const [swapPick, setSwapPick] = useState<Record<string, number | "">>({});
 
   const signInMagicLink = async () => {
-    setMsg("");
-    const { error } = await supabase.auth.signInWithOtp({ email });
-    setMsg(error ? error.message : "Check your email for the magic link.");
-  };
+  setMsg("");
+
+  const { error } = await supabase.auth.signInWithOtp({
+    email,
+    options: {
+      emailRedirectTo: `${window.location.origin}/`,
+    },
+  });
+
+  setMsg(error ? error.message : "Check your email for the magic link.");
+};
+
 
   const sessionKeyForToday = () => `gym.session_start.${todayIso()}`;
 
