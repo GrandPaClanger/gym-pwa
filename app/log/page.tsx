@@ -590,22 +590,59 @@ export default function LogPage() {
     setMsg(error ? error.message : "Session saved.");
   };
 
+  // HARDENED AUTH INIT: never hang on "Checking sign-in…"
   useEffect(() => {
+    let mounted = true;
+
+    const safeEnsureSessionStart = () => {
+      try {
+        ensureSessionStart();
+      } catch (e) {
+        console.error("ensureSessionStart failed", e);
+      }
+    };
+
     (async () => {
-      const { data } = await supabase.auth.getSession();
-      setIsAuthed(!!data.session);
-      setAuthReady(true);
-      if (data.session) ensureSessionStart();
+      try {
+        const { data, error } = await supabase.auth.getSession();
+        if (!mounted) return;
+
+        if (error) console.error("getSession error", error);
+
+        const authed = !!data?.session;
+        setIsAuthed(authed);
+        setAuthReady(true);
+
+        if (authed) safeEnsureSessionStart();
+      } catch (e) {
+        console.error("getSession threw", e);
+        if (!mounted) return;
+        setIsAuthed(false);
+        setAuthReady(true);
+        setMsg("Auth check failed (see console).");
+      }
     })();
 
     const { data: sub } = supabase.auth.onAuthStateChange((_evt, session) => {
+      if (!mounted) return;
+
       setIsAuthed(!!session);
       setAuthReady(true);
-      if (session) ensureSessionStart();
+
+      if (session) safeEnsureSessionStart();
       else setRows([]);
     });
 
-    return () => sub.subscription.unsubscribe();
+    const t = setTimeout(() => {
+      if (!mounted) return;
+      setAuthReady(true);
+    }, 1500);
+
+    return () => {
+      mounted = false;
+      clearTimeout(t);
+      sub.subscription.unsubscribe();
+    };
   }, []);
 
   useEffect(() => {
