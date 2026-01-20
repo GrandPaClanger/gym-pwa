@@ -1,9 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
 
-type PlanRow = {
+type TodayRow = {
   plan_date: string;
   sequence_no: number;
   exercise_name: string;
@@ -14,189 +14,208 @@ type PlanRow = {
   suggested_load_kg: number | null;
 };
 
-function ddmmyyyy(d: Date) {
-  const dd = String(d.getDate()).padStart(2, "0");
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const yyyy = d.getFullYear();
-  return `${dd}/${mm}/${yyyy}`;
+const todayIso = () => new Date().toISOString().slice(0, 10);
+
+function minsFromSec(sec: number | null) {
+  if (!sec || sec <= 0) return 0;
+  return Math.round(sec / 60);
 }
 
-function isoDate(d: Date) {
-  return d.toISOString().slice(0, 10);
+function targetText(r: TodayRow) {
+  if (r.exercise_type === 2) {
+    const m = minsFromSec(r.target_duration_sec);
+    return m > 0 ? `${m} min` : "";
+  }
+  const sets = r.target_sets ?? 3;
+  const reps = r.target_reps ?? 10;
+  return `${sets}×${reps}`;
 }
 
 export default function HomePage() {
-  const [sessionReady, setSessionReady] = useState(false);
   const [isAuthed, setIsAuthed] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
 
-  const [email, setEmail] = useState("");
   const [msg, setMsg] = useState("");
+  const [loading, setLoading] = useState(true);
 
-  const [rows, setRows] = useState<PlanRow[]>([]);
-  const today = new Date();
+  const [rows, setRows] = useState<TodayRow[]>([]);
+
+  const checkIsAdmin = async () => {
+    const { data, error } = await supabase.rpc("is_admin_user");
+    setIsAdmin(!error && !!data);
+  };
 
   const loadToday = async () => {
     setMsg("");
+    setLoading(true);
+
+    // Prefer your existing “today view” if present.
+    // If your view name differs, change it here.
     const { data, error } = await supabase
       .from("v_today_plan_app")
-      .select("*")
+      .select(
+        "plan_date, sequence_no, exercise_name, exercise_type, target_sets, target_reps, target_duration_sec, suggested_load_kg"
+      )
+      .eq("plan_date", todayIso())
       .order("sequence_no", { ascending: true });
 
-    if (error) setMsg(error.message);
-    else setRows((data as PlanRow[]) ?? []);
+    if (error) {
+      setRows([]);
+      setLoading(false);
+      setMsg(error.message);
+      return;
+    }
+
+    setRows((data as any[]) as TodayRow[]);
+    setLoading(false);
   };
 
-  const signInMagicLink = async () => {
+  const generateRegenerate = async () => {
     setMsg("");
-    const { error } = await supabase.auth.signInWithOtp({
-      email,
-      options: { emailRedirectTo: window.location.origin }, // drives localhost redirect
-    });
-    setMsg(error ? error.message : "Magic link sent. Check your email.");
-  };
 
-  const signOut = async () => {
-    setMsg("");
-    await supabase.auth.signOut();
-    setRows([]);
-    setIsAuthed(false);
-  };
-
-  const generatePlan = async () => {
-    setMsg("");
-    const startDate = isoDate(new Date());
-    const days = 5;
-
-    const { error } = await supabase.rpc("generate_plan", {
-      p_start_date: startDate,
-      p_days: days,
+    // Uses your wrapper described in carry-over:
+    // public.generate_plan_days(p_start_date date, p_days int, p_cooldown_days int)
+    const { error } = await supabase.rpc("generate_plan_days", {
+      p_start_date: todayIso(),
+      p_days: 1,
+      p_cooldown_days: 10,
     });
 
-    setMsg(error ? error.message : "Plan generated.");
-    if (!error) await loadToday();
+    if (error) return setMsg(error.message);
+
+    await loadToday();
+    setMsg("Plan generated.");
   };
 
   const generateEmptyPlan = async () => {
     setMsg("");
-    const startDate = isoDate(new Date());
-    const days = 5;
 
+    // If your function name/params differ, update this call.
+    // Common patterns: generate_empty_plan(p_plan_date date) or generate_empty_plan_days(...)
     const { error } = await supabase.rpc("generate_empty_plan", {
-      p_start_date: startDate,
-      p_days: days,
+      p_plan_date: todayIso(),
     });
 
-    setMsg(error ? error.message : "Empty plan created.");
-    if (!error) await loadToday();
+    if (error) return setMsg(error.message);
+
+    await loadToday();
+    setMsg("Empty plan generated.");
+  };
+
+  const refresh = async () => {
+    await loadToday();
+    setMsg("");
+  };
+
+  const signOut = async () => {
+    await supabase.auth.signOut();
+    setIsAdmin(false);
+    setRows([]);
+    setMsg("");
   };
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => {
-      setIsAuthed(!!data.session);
-      setSessionReady(true);
-      if (data.session) loadToday();
-    });
+    (async () => {
+      const { data } = await supabase.auth.getSession();
+      const ok = !!data.session;
+      setIsAuthed(ok);
 
-    const { data: sub } = supabase.auth.onAuthStateChange((_evt, s) => {
-      setIsAuthed(!!s);
-      setSessionReady(true);
-      if (s) loadToday();
-      else setRows([]);
+      if (ok) {
+        await checkIsAdmin();
+        await loadToday();
+      } else {
+        setLoading(false);
+      }
+    })();
+
+    const { data: sub } = supabase.auth.onAuthStateChange(async (_evt, session) => {
+      const ok = !!session;
+      setIsAuthed(ok);
+
+      if (ok) {
+        await checkIsAdmin();
+        await loadToday();
+      } else {
+        setIsAdmin(false);
+        setRows([]);
+        setMsg("");
+      }
     });
 
     return () => sub.subscription.unsubscribe();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  if (!sessionReady) return <main style={{ padding: 24, fontFamily: "system-ui" }}>Loading…</main>;
+  const th: React.CSSProperties = { textAlign: "left", padding: "10px 8px", borderBottom: "1px solid #333" };
+  const td: React.CSSProperties = { padding: "10px 8px", borderBottom: "1px solid #222", verticalAlign: "top" };
 
-  if (!isAuthed) {
-    return (
-      <main style={{ maxWidth: 520, margin: "40px auto", padding: 16, fontFamily: "system-ui" }}>
-        <h2 style={{ marginTop: 0 }}>Gym PWA</h2>
-        <p>Login (magic link)</p>
-
-        <div style={{ display: "flex", gap: 8 }}>
-          <input
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            placeholder="you@email.com"
-            style={{ flex: 1, padding: 10 }}
-          />
-          <button onClick={signInMagicLink} style={{ padding: 10 }}>
-            Send link
-          </button>
-        </div>
-
-        {msg && <p style={{ marginTop: 12 }}>{msg}</p>}
-      </main>
-    );
-  }
+  const titleDate = useMemo(() => {
+    const d = new Date();
+    const dd = String(d.getDate()).padStart(2, "0");
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const yyyy = d.getFullYear();
+    return `${dd}/${mm}/${yyyy}`;
+  }, []);
 
   return (
-    <main style={{ maxWidth: 980, margin: "24px auto", padding: 16, fontFamily: "system-ui" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <h2 style={{ margin: 0 }}>Today ({ddmmyyyy(today)})</h2>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <button onClick={generatePlan} style={{ padding: 10 }}>
-            Generate / Regenerate
-          </button>
-          <button onClick={generateEmptyPlan} style={{ padding: 10 }}>
-            Generate Empty Plan
-          </button>
-          <button onClick={loadToday} style={{ padding: 10 }}>
-            Refresh
-          </button>
-          <button onClick={signOut} style={{ padding: 10 }}>
-            Sign out
-          </button>
+    <main style={{ padding: 20, maxWidth: 1100, margin: "0 auto" }}>
+      <h1 style={{ marginBottom: 8, textAlign: "center" }}>Today ({titleDate})</h1>
+
+      <div style={{ textAlign: "center", marginBottom: 14 }}>
+        <div style={{ marginTop: 10, display: "flex", gap: 14, justifyContent: "center", flexWrap: "wrap" }}>
+          <a href="/log">Go to Log Session →</a>
+          {isAdmin && <a href="/admin/exercises">Admin: Exercise Maintenance →</a>}
         </div>
       </div>
 
-      <div style={{ marginTop: 10 }}>
-        <a href="/log">Go to Log Session →</a>
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", justifyContent: "flex-end", marginBottom: 14 }}>
+        <button onClick={generateRegenerate} style={{ padding: "10px 14px" }} disabled={!isAuthed}>
+          Generate / Regenerate
+        </button>
+        <button onClick={generateEmptyPlan} style={{ padding: "10px 14px" }} disabled={!isAuthed}>
+          Generate Empty Plan
+        </button>
+        <button onClick={refresh} style={{ padding: "10px 14px" }} disabled={!isAuthed}>
+          Refresh
+        </button>
+        <button onClick={signOut} style={{ padding: "10px 14px" }} disabled={!isAuthed}>
+          Sign out
+        </button>
       </div>
 
-      {msg && <p style={{ marginTop: 12 }}>{msg}</p>}
+      {msg && <div style={{ marginBottom: 12, textAlign: "center" }}>{msg}</div>}
+      {loading && <div style={{ marginBottom: 12, textAlign: "center" }}>Loading…</div>}
 
-      <table style={{ width: "100%", marginTop: 16, borderCollapse: "collapse" }}>
-        <thead>
-          <tr>
-            <th style={th}>#</th>
-            <th style={th}>Exercise</th>
-            <th style={th}>Target</th>
-            <th style={th}>Suggested (kg)</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r) => {
-            const target =
-              r.exercise_type === 2
-                ? `${Math.round((r.target_duration_sec ?? 300) / 60)} min`
-                : `${r.target_sets ?? 3} x ${r.target_reps ?? 10}`;
-
-            const suggested = r.exercise_type === 1 ? (r.suggested_load_kg ?? "") : "";
-
-            return (
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <thead>
+            <tr>
+              <th style={th}>#</th>
+              <th style={th}>Exercise</th>
+              <th style={th}>Target</th>
+              <th style={th}>Suggested (kg)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
               <tr key={`${r.plan_date}-${r.sequence_no}`}>
                 <td style={td}>{r.sequence_no}</td>
                 <td style={td}>{r.exercise_name}</td>
-                <td style={td}>{target}</td>
-                <td style={td}>{suggested}</td>
+                <td style={td}>{targetText(r)}</td>
+                <td style={td}>{r.suggested_load_kg ?? ""}</td>
               </tr>
-            );
-          })}
-          {rows.length === 0 && (
-            <tr>
-              <td style={td} colSpan={4}>
-                No plan rows returned.
-              </td>
-            </tr>
-          )}
-        </tbody>
-      </table>
+            ))}
+
+            {!loading && rows.length === 0 && (
+              <tr>
+                <td style={td} colSpan={4}>
+                  No plan rows for today.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
     </main>
   );
 }
-
-const th: React.CSSProperties = { textAlign: "left", borderBottom: "1px solid #ddd", padding: 10 };
-const td: React.CSSProperties = { borderBottom: "1px solid #eee", padding: 10, verticalAlign: "top" };
