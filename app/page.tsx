@@ -49,32 +49,31 @@ export default function HomePage() {
     setMsg("");
     setLoading(true);
 
-    // Prefer your existing “today view” if present.
-    // If your view name differs, change it here.
-    const { data, error } = await supabase
-      .from("v_today_plan_app")
-      .select(
-        "plan_date, sequence_no, exercise_name, exercise_type, target_sets, target_reps, target_duration_sec, suggested_load_kg"
-      )
-      .eq("plan_date", todayIso())
-      .order("sequence_no", { ascending: true });
+    try {
+      // IMPORTANT: use the same view as /log so behaviour matches.
+      const { data, error } = await supabase
+        .from("v_plan_today_edit")
+        .select(
+          "plan_date, sequence_no, exercise_name, exercise_type, target_sets, target_reps, target_duration_sec, suggested_load_kg"
+        )
+        .eq("plan_date", todayIso())
+        .order("sequence_no", { ascending: true });
 
-    if (error) {
-      setRows([]);
+      if (error) {
+        setRows([]);
+        setMsg(error.message);
+        return;
+      }
+
+      setRows(((data as any[]) ?? []) as TodayRow[]);
+    } finally {
       setLoading(false);
-      setMsg(error.message);
-      return;
     }
-
-    setRows((data as any[]) as TodayRow[]);
-    setLoading(false);
   };
 
   const generateRegenerate = async () => {
     setMsg("");
 
-    // Uses your wrapper described in carry-over:
-    // public.generate_plan_days(p_start_date date, p_days int, p_cooldown_days int)
     const { error } = await supabase.rpc("generate_plan_days", {
       p_start_date: todayIso(),
       p_days: 1,
@@ -90,8 +89,6 @@ export default function HomePage() {
   const generateEmptyPlan = async () => {
     setMsg("");
 
-    // If your function name/params differ, update this call.
-    // Common patterns: generate_empty_plan(p_plan_date date) or generate_empty_plan_days(...)
     const { error } = await supabase.rpc("generate_empty_plan", {
       p_plan_date: todayIso(),
     });

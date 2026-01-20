@@ -69,12 +69,22 @@ function parseNumberOrBlank(v: string): number | "" {
   const n = Number(v);
   return Number.isFinite(n) ? n : "";
 }
+
+function parseDecimalOrNull(v: string): number | null {
+  const t = (v ?? "").trim();
+  if (!t) return null;
+  const n = Number(t);
+  if (!Number.isFinite(n)) return null;
+  return Math.round(n * 100) / 100; // 2dp
+}
+
 function asIntOrNull(v: number | "" | null | undefined): number | null {
   if (v === "" || v == null) return null;
   const n = Number(v);
   if (!Number.isFinite(n)) return null;
   return Math.max(0, Math.round(n));
 }
+
 const clampReps = (v: number) => Math.max(REP_MIN, Math.min(REP_MAX, Math.round(v)));
 const isValidReps = (v: number) => Number.isFinite(v) && v >= REP_MIN && v <= REP_MAX;
 
@@ -97,7 +107,8 @@ export default function LogPage() {
 
   const [sets, setSets] = useState<Record<string, number | "">>({});
   const [reps, setReps] = useState<Record<string, number | "">>({});
-  const [loads, setLoads] = useState<Record<string, number | "">>({});
+  // IMPORTANT: keep loads as strings so decimals don't get collapsed while typing
+  const [loads, setLoads] = useState<Record<string, string>>({});
   const [durationsMin, setDurationsMin] = useState<Record<string, number | "">>({});
   const [caloriesKcal, setCaloriesKcal] = useState<Record<string, number | "">>({});
 
@@ -289,7 +300,7 @@ export default function LogPage() {
 
     const nextSets: Record<string, number | ""> = {};
     const nextReps: Record<string, number | ""> = {};
-    const nextLoads: Record<string, number | ""> = {};
+    const nextLoads: Record<string, string> = {};
     const nextDurMin: Record<string, number | ""> = {};
     const nextCal: Record<string, number | ""> = {};
 
@@ -299,7 +310,7 @@ export default function LogPage() {
         nextSets[k] = row.target_sets ?? 3;
         nextReps[k] = row.target_reps ?? 10;
         const d = getRowDefaultLoad(row);
-        nextLoads[k] = d ?? "";
+        nextLoads[k] = d == null ? "" : String(d);
       } else {
         const mins = row.target_duration_sec != null ? Math.round(row.target_duration_sec / 60) : 0;
         nextDurMin[k] = mins;
@@ -474,6 +485,7 @@ export default function LogPage() {
         )
       );
       clearLocalEditsForKey(k);
+      if (ex.exercise_type === 1) setLoads((p) => ({ ...p, [k]: "" }));
       if (ex.exercise_type === 2 && ex.is_distance_based) setCaloriesKcal((p) => ({ ...p, [k]: "" }));
       setMsg("Swapped.");
       return;
@@ -529,14 +541,13 @@ export default function LogPage() {
 
       const setCount = (sets[k] ?? defaultSets) as number | "";
       const repsVal = (reps[k] ?? defaultReps) as number | "";
-      const loadVal = (loads[k] ?? (defaultLoad ?? "")) as number | "";
 
       const s = setCount === "" ? defaultSets : Number(setCount);
       const repNum = repsVal === "" ? defaultReps : Number(repsVal);
       const rep = clampReps(repNum);
 
-      const load = loadVal === "" ? null : Number(loadVal);
-      const load_kg = load == null || Number.isNaN(load) ? null : load;
+      const loadText = loads[k] ?? (defaultLoad == null ? "" : String(defaultLoad));
+      const load_kg = parseDecimalOrNull(loadText);
 
       const setsArr: StrengthSet[] = [];
       for (let i = 0; i < Math.max(1, Math.round(s)); i++) setsArr.push({ reps: rep, load_kg });
@@ -717,7 +728,7 @@ export default function LogPage() {
               const showReps = (reps[k] ?? (r.target_reps ?? 10)) as number | "";
 
               const defaultLoad = getRowDefaultLoad(r);
-              const showLoad = (loads[k] ?? (defaultLoad ?? "")) as number | "";
+              const showLoad = loads[k] ?? (defaultLoad == null ? "" : String(defaultLoad));
 
               const targetMin = r.target_duration_sec != null ? Math.round(r.target_duration_sec / 60) : 0;
               const showMin = (durationsMin[k] ?? targetMin) as number | "";
@@ -742,7 +753,8 @@ export default function LogPage() {
                             onChange={(e) => {
                               const raw = parseNumberOrBlank(e.target.value);
                               setReps((prev) => ({ ...prev, [k]: raw }));
-                              if (raw !== "" && mode === "plan") queueAutosave(r.sequence_no, { target_reps: clampReps(raw) });
+                              if (raw !== "" && mode === "plan")
+                                queueAutosave(r.sequence_no, { target_reps: clampReps(raw) });
                             }}
                             style={{ width: 90, marginLeft: 6, padding: 6 }}
                           />
@@ -753,11 +765,12 @@ export default function LogPage() {
                           <input
                             type="text"
                             inputMode="decimal"
-                            value={showLoad === "" ? "" : String(showLoad)}
+                            value={showLoad}
                             onChange={(e) => {
-                              const v = parseNumberOrBlank(e.target.value);
-                              setLoads((prev) => ({ ...prev, [k]: v }));
-                              if (mode === "plan") queueAutosave(r.sequence_no, { target_load_kg: v === "" ? null : v });
+                              const raw = e.target.value;
+                              setLoads((prev) => ({ ...prev, [k]: raw }));
+                              if (mode === "plan")
+                                queueAutosave(r.sequence_no, { target_load_kg: parseDecimalOrNull(raw) });
                             }}
                             style={{ width: 110, marginLeft: 6, padding: 6 }}
                           />
@@ -772,7 +785,8 @@ export default function LogPage() {
                             onChange={(e) => {
                               const v = parseNumberOrBlank(e.target.value);
                               setSets((prev) => ({ ...prev, [k]: v }));
-                              if (v !== "" && mode === "plan") queueAutosave(r.sequence_no, { target_sets: Math.max(1, Math.round(v)) });
+                              if (v !== "" && mode === "plan")
+                                queueAutosave(r.sequence_no, { target_sets: Math.max(1, Math.round(v)) });
                             }}
                             style={{ width: 70, marginLeft: 6, padding: 6 }}
                           />
@@ -795,7 +809,8 @@ export default function LogPage() {
                             onChange={(e) => {
                               const v = parseNumberOrBlank(e.target.value);
                               setDurationsMin((prev) => ({ ...prev, [k]: v }));
-                              if (v !== "" && mode === "plan") queueAutosave(r.sequence_no, { target_duration_sec: Math.max(0, Math.round(v * 60)) });
+                              if (v !== "" && mode === "plan")
+                                queueAutosave(r.sequence_no, { target_duration_sec: Math.max(0, Math.round(v * 60)) });
                               if (v === "" && mode === "plan") queueAutosave(r.sequence_no, { target_duration_sec: 0 });
                             }}
                             style={{ width: 90, marginLeft: 6, padding: 6 }}
