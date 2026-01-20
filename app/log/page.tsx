@@ -106,18 +106,6 @@ export default function LogPage() {
 
   const [swapPick, setSwapPick] = useState<Record<string, number | "">>({});
 
-  // Admin / create exercise UI
-  const [isAdmin, setIsAdmin] = useState<boolean>(false);
-
-  const [newExName, setNewExName] = useState<string>("");
-  const [newExType, setNewExType] = useState<1 | 2>(1);
-  const [newExManualOnly, setNewExManualOnly] = useState<boolean>(false);
-  const [newExDistanceBased, setNewExDistanceBased] = useState<boolean>(false);
-
-  const [slotCodes, setSlotCodes] = useState<string[]>([]);
-  const [newExSlotCode, setNewExSlotCode] = useState<string>(""); // optional
-  const [newExBaseWeight, setNewExBaseWeight] = useState<number | "">(1);
-
   const signInMagicLink = async () => {
     setMsg("");
     const { error } = await supabase.auth.signInWithOtp({ email });
@@ -171,32 +159,6 @@ export default function LogPage() {
     setExerciseList(list);
   };
 
-  const loadSlotCodes = async () => {
-    // We’ll derive slot codes from exercise_slot.
-    // If RLS blocks it, we’ll just leave the dropdown empty and you can still create exercises without mapping.
-    const { data, error } = await supabase.from("exercise_slot").select("slot_code");
-    if (error) {
-      setSlotCodes([]);
-      return;
-    }
-    const codes = Array.from(new Set(((data as any[]) ?? []).map((r) => String(r.slot_code)))).sort((a, b) =>
-      a.localeCompare(b)
-    );
-    setSlotCodes(codes);
-
-    // sensible default: pick first if none selected yet
-    if (!newExSlotCode && codes.length) setNewExSlotCode(codes[0]);
-  };
-
-  const checkIsAdmin = async () => {
-    const { data, error } = await supabase.rpc("is_admin_user");
-    if (error) {
-      setIsAdmin(false);
-      return;
-    }
-    setIsAdmin(!!data);
-  };
-
   const exerciseById = useMemo(() => {
     const m = new Map<number, Exercise>();
     for (const e of exerciseList) m.set(e.exercise_id, e);
@@ -212,9 +174,7 @@ export default function LogPage() {
   const isDistanceBasedRow = (r: Row) => {
     if (r.exercise_type !== 2) return false;
 
-    if (r.exercise_id != null) {
-      return !!exerciseById.get(r.exercise_id)?.is_distance_based;
-    }
+    if (r.exercise_id != null) return !!exerciseById.get(r.exercise_id)?.is_distance_based;
 
     const byName = exerciseByName.get(normName(r.exercise_name));
     return !!byName?.is_distance_based;
@@ -293,8 +253,8 @@ export default function LogPage() {
 
   const loadTodayPlanRows = async () => {
     setMsg("");
-
     const planDate = todayIso();
+
     const { data, error } = await supabase
       .from("v_plan_today_edit")
       .select("*")
@@ -306,10 +266,8 @@ export default function LogPage() {
       return;
     }
 
-    // If exercise_id is missing from the view, recover it by canonical_name.
     const src = ((data as PlanRowFromView[]) ?? []).map<Row>((r) => {
       const recoveredId = r.exercise_id ?? exerciseByName.get(normName(r.exercise_name))?.exercise_id ?? null;
-
       return {
         source: "plan",
         plan_date: planDate,
@@ -375,10 +333,8 @@ export default function LogPage() {
       p_days: 1,
       p_start_date: todayIso(),
     });
-    if (error) {
-      setMsg(error.message);
-      return;
-    }
+    if (error) return setMsg(error.message);
+
     await loadTodayPlanRows();
     setMsg("Plan refreshed.");
   };
@@ -395,10 +351,7 @@ export default function LogPage() {
       autosaveTimers.current[k] = null;
 
       const pid = await requirePlanId();
-      if (!pid) {
-        setMsg("No plan loaded. Click Refresh plan.");
-        return;
-      }
+      if (!pid) return setMsg("No plan loaded. Click Refresh plan.");
 
       const { error } = await supabase
         .from("workout_plan_item")
@@ -455,10 +408,7 @@ export default function LogPage() {
     }
 
     const pid = await requirePlanId();
-    if (!pid) {
-      setMsg("No plan loaded. Click Refresh plan.");
-      return;
-    }
+    if (!pid) return setMsg("No plan loaded. Click Refresh plan.");
 
     const insertRow: any = {
       plan_id: pid,
@@ -472,85 +422,11 @@ export default function LogPage() {
     if (ex.exercise_type === 2) insertRow.target_duration_sec = 8 * 60;
 
     const { error } = await supabase.from("workout_plan_item").insert(insertRow);
-    if (error) {
-      setMsg(error.message);
-      return;
-    }
+    if (error) return setMsg(error.message);
 
     setAddExerciseId("");
     await loadTodayPlanRows();
     setMsg("Exercise added.");
-  };
-
-  const createExercise = async () => {
-    setMsg("");
-
-    if (!isAdmin) {
-      setMsg("Create exercise failed: Not authorized");
-      return;
-    }
-
-    const name = newExName.trim();
-    if (!name) {
-      setMsg("Enter a name for the new exercise.");
-      return;
-    }
-
-    const exType = newExType;
-    const dist = exType === 2 ? newExDistanceBased : false;
-
-    // Create (admin RPC)
-    const { data, error } = await supabase.rpc("admin_create_exercise", {
-      p_canonical_name: name,
-      p_exercise_type: exType,
-      p_is_manual_only: newExManualOnly,
-      p_is_distance_based: dist,
-      p_is_active: true,
-    });
-
-    if (error) {
-      setMsg(`Create exercise failed: ${error.message}`);
-      return;
-    }
-
-    const newId = Number(data);
-    if (!Number.isFinite(newId)) if (!Number.isFinite(newId)) {
-      setMsg("Create exercise failed: unexpected return value.");
-      return;
-    }
-
-    // Optional: map to slot
-    const slot = (newExSlotCode ?? "").trim();
-    if (slot) {
-      const bw = newExBaseWeight === "" ? 1 : Number(newExBaseWeight);
-      const baseWeight = Number.isFinite(bw) ? bw : 1;
-
-      const { error: mapErr } = await supabase.rpc("admin_map_exercise_slot", {
-        p_exercise_id: newId,
-        p_slot_code: slot,
-        p_base_weight: baseWeight,
-      });
-
-      if (mapErr) {
-        await loadExerciseList();
-        setMsg(`Exercise created (id=${newId}), but slot mapping failed: ${mapErr.message}`);
-        return;
-      }
-    }
-
-    // refresh dropdown + preselect the new exercise
-    await loadExerciseList();
-    setAddExerciseQuery(name);
-    setAddExerciseId(newId);
-
-    // reset form
-    setNewExName("");
-    setNewExType(1);
-    setNewExManualOnly(false);
-    setNewExDistanceBased(false);
-    setNewExBaseWeight(1);
-
-    setMsg(slot ? "Exercise created and mapped." : "Exercise created.");
   };
 
   const removeRow = async (sequence_no: number) => {
@@ -565,21 +441,10 @@ export default function LogPage() {
     }
 
     const pid = await requirePlanId();
-    if (!pid) {
-      setMsg("No plan loaded. Click Refresh plan.");
-      return;
-    }
+    if (!pid) return setMsg("No plan loaded. Click Refresh plan.");
 
-    const { error } = await supabase
-      .from("workout_plan_item")
-      .delete()
-      .eq("plan_id", pid)
-      .eq("sequence_no", sequence_no);
-
-    if (error) {
-      setMsg(error.message);
-      return;
-    }
+    const { error } = await supabase.from("workout_plan_item").delete().eq("plan_id", pid).eq("sequence_no", sequence_no);
+    if (error) return setMsg(error.message);
 
     await loadTodayPlanRows();
     setMsg("Removed.");
@@ -615,10 +480,7 @@ export default function LogPage() {
     }
 
     const pid = await requirePlanId();
-    if (!pid) {
-      setMsg("No plan loaded. Click Refresh plan.");
-      return;
-    }
+    if (!pid) return setMsg("No plan loaded. Click Refresh plan.");
 
     const patch: PlanItemPatch = {
       exercise_id: ex.exercise_id,
@@ -655,17 +517,9 @@ export default function LogPage() {
         const duration_sec = Math.max(0, Math.round(minutes * 60));
 
         const cardioSet: CardioSet = { duration_sec };
+        if (isDistanceBasedRow(r)) cardioSet.calories_kcal = asIntOrNull(caloriesKcal[k] ?? "");
 
-        if (isDistanceBasedRow(r)) {
-          cardioSet.calories_kcal = asIntOrNull(caloriesKcal[k] ?? "");
-        }
-
-        out.push({
-          sequence_no: r.sequence_no,
-          kind: "cardio",
-          name: r.exercise_name,
-          sets: [cardioSet],
-        });
+        out.push({ sequence_no: r.sequence_no, kind: "cardio", name: r.exercise_name, sets: [cardioSet] });
         continue;
       }
 
@@ -685,16 +539,9 @@ export default function LogPage() {
       const load_kg = load == null || Number.isNaN(load) ? null : load;
 
       const setsArr: StrengthSet[] = [];
-      for (let i = 0; i < Math.max(1, Math.round(s)); i++) {
-        setsArr.push({ reps: rep, load_kg });
-      }
+      for (let i = 0; i < Math.max(1, Math.round(s)); i++) setsArr.push({ reps: rep, load_kg });
 
-      out.push({
-        sequence_no: r.sequence_no,
-        kind: "strength",
-        name: r.exercise_name,
-        sets: setsArr,
-      });
+      out.push({ sequence_no: r.sequence_no, kind: "strength", name: r.exercise_name, sets: setsArr });
     }
 
     return out;
@@ -712,10 +559,7 @@ export default function LogPage() {
       const defaultReps = r.target_reps ?? 10;
       const repRaw = reps[k] ?? defaultReps;
       const repNum = repRaw === "" ? defaultReps : Number(repRaw);
-      if (!isValidReps(repNum)) {
-        setMsg(`Reps out of range for "${r.exercise_name}" (must be ${REP_MIN}-${REP_MAX}).`);
-        return;
-      }
+      if (!isValidReps(repNum)) return setMsg(`Reps out of range for "${r.exercise_name}" (${REP_MIN}-${REP_MAX}).`);
     }
 
     const { error } = await supabase.rpc("log_session_json", {
@@ -747,8 +591,6 @@ export default function LogPage() {
     if (!isAuthed) return;
     (async () => {
       await loadExerciseList();
-      await loadSlotCodes();
-      await checkIsAdmin();
       await loadTodayPlanRows();
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -830,7 +672,6 @@ export default function LogPage() {
 
       {msg && <div style={{ marginBottom: 14 }}>{msg}</div>}
 
-      {/* Add from list */}
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginBottom: 14 }}>
         <input
           value={addExerciseQuery}
@@ -859,80 +700,6 @@ export default function LogPage() {
         </button>
       </div>
 
-      {/* Create new exercise */}
-      <div style={{ marginBottom: 14, padding: 12, border: "1px solid #222", borderRadius: 8 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-          <b>Create new exercise</b>
-          {!isAdmin && <span style={{ color: "#a66" }}>Not authorized</span>}
-        </div>
-
-        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-          <input
-            value={newExName}
-            onChange={(e) => setNewExName(e.target.value)}
-            placeholder="New exercise name (canonical_name)"
-            style={{ padding: 10, minWidth: 280 }}
-          />
-
-          <select
-            value={newExType}
-            onChange={(e) => setNewExType(Number(e.target.value) === 2 ? 2 : 1)}
-            style={{ padding: 10, minWidth: 140 }}
-          >
-            <option value={1}>Strength</option>
-            <option value={2}>Cardio</option>
-          </select>
-
-          <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <input
-              type="checkbox"
-              checked={newExManualOnly}
-              onChange={(e) => setNewExManualOnly(e.target.checked)}
-            />
-            Manual-only
-          </label>
-
-          <label style={{ display: "flex", alignItems: "center", gap: 6, opacity: newExType === 2 ? 1 : 0.5 }}>
-            <input
-              type="checkbox"
-              checked={newExDistanceBased}
-              onChange={(e) => setNewExDistanceBased(e.target.checked)}
-              disabled={newExType !== 2}
-            />
-            Distance-based (Calories)
-          </label>
-
-          <select
-            value={newExSlotCode}
-            onChange={(e) => setNewExSlotCode(e.target.value)}
-            style={{ padding: 10, minWidth: 200 }}
-          >
-            <option value="">(No slot mapping)</option>
-            {slotCodes.map((s) => (
-              <option key={s} value={s}>
-                {s}
-              </option>
-            ))}
-          </select>
-
-          <label>
-            Weight:
-            <input
-              type="text"
-              inputMode="decimal"
-              value={newExBaseWeight === "" ? "" : String(newExBaseWeight)}
-              onChange={(e) => setNewExBaseWeight(parseNumberOrBlank(e.target.value))}
-              style={{ width: 90, marginLeft: 6, padding: 6 }}
-            />
-          </label>
-
-          <button onClick={createExercise} style={{ padding: "10px 14px" }} disabled={!isAdmin}>
-            Create
-          </button>
-        </div>
-      </div>
-
-      {/* Rows table */}
       <div style={{ overflowX: "auto" }}>
         <table style={{ width: "100%", borderCollapse: "collapse" }}>
           <thead>
@@ -975,8 +742,7 @@ export default function LogPage() {
                             onChange={(e) => {
                               const raw = parseNumberOrBlank(e.target.value);
                               setReps((prev) => ({ ...prev, [k]: raw }));
-                              if (raw !== "" && mode === "plan")
-                                queueAutosave(r.sequence_no, { target_reps: clampReps(raw) });
+                              if (raw !== "" && mode === "plan") queueAutosave(r.sequence_no, { target_reps: clampReps(raw) });
                             }}
                             style={{ width: 90, marginLeft: 6, padding: 6 }}
                           />
@@ -1006,8 +772,7 @@ export default function LogPage() {
                             onChange={(e) => {
                               const v = parseNumberOrBlank(e.target.value);
                               setSets((prev) => ({ ...prev, [k]: v }));
-                              if (v !== "" && mode === "plan")
-                                queueAutosave(r.sequence_no, { target_sets: Math.max(1, Math.round(v)) });
+                              if (v !== "" && mode === "plan") queueAutosave(r.sequence_no, { target_sets: Math.max(1, Math.round(v)) });
                             }}
                             style={{ width: 70, marginLeft: 6, padding: 6 }}
                           />
@@ -1030,8 +795,7 @@ export default function LogPage() {
                             onChange={(e) => {
                               const v = parseNumberOrBlank(e.target.value);
                               setDurationsMin((prev) => ({ ...prev, [k]: v }));
-                              if (v !== "" && mode === "plan")
-                                queueAutosave(r.sequence_no, { target_duration_sec: Math.max(0, Math.round(v * 60)) });
+                              if (v !== "" && mode === "plan") queueAutosave(r.sequence_no, { target_duration_sec: Math.max(0, Math.round(v * 60)) });
                               if (v === "" && mode === "plan") queueAutosave(r.sequence_no, { target_duration_sec: 0 });
                             }}
                             style={{ width: 90, marginLeft: 6, padding: 6 }}

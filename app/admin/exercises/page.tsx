@@ -12,45 +12,44 @@ type Exercise = {
   is_active: boolean;
 };
 
-function norm(s: string) {
-  return (s ?? "").trim().toLowerCase();
+const norm = (s: string) => (s ?? "").trim().toLowerCase();
+
+function parseNumberOrBlank(v: string): number | "" {
+  if (v === "") return "";
+  const n = Number(v);
+  return Number.isFinite(n) ? n : "";
 }
 
 export default function AdminExercisesPage() {
   const [isAuthed, setIsAuthed] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
-
   const [msg, setMsg] = useState("");
   const [loading, setLoading] = useState(true);
 
-  const [search, setSearch] = useState("");
   const [items, setItems] = useState<Exercise[]>([]);
   const [slotCodes, setSlotCodes] = useState<string[]>([]);
+  const [search, setSearch] = useState("");
 
   const [selectedId, setSelectedId] = useState<number | null>(null);
 
-  // Create form
+  // Create
   const [newName, setNewName] = useState("");
   const [newType, setNewType] = useState<1 | 2 | 3>(1);
   const [newManual, setNewManual] = useState(false);
   const [newDistance, setNewDistance] = useState(false);
   const [newActive, setNewActive] = useState(true);
-
   const [newSlot, setNewSlot] = useState("");
   const [newBaseWeight, setNewBaseWeight] = useState<number | "">(1);
 
-  // Edit form
-  const selected = useMemo(
-    () => items.find((x) => x.exercise_id === selectedId) ?? null,
-    [items, selectedId]
-  );
-
+  // Edit
+  const selected = useMemo(() => items.find((x) => x.exercise_id === selectedId) ?? null, [items, selectedId]);
   const [editName, setEditName] = useState("");
   const [editType, setEditType] = useState<1 | 2 | 3>(1);
   const [editManual, setEditManual] = useState(false);
   const [editDistance, setEditDistance] = useState(false);
   const [editActive, setEditActive] = useState(true);
 
+  // Map
   const [mapSlot, setMapSlot] = useState("");
   const [mapBaseWeight, setMapBaseWeight] = useState<number | "">(1);
 
@@ -64,7 +63,7 @@ export default function AdminExercisesPage() {
     setMsg("");
     setLoading(true);
 
-    // Admin gate
+    // admin gate
     const adminRes = await supabase.rpc("is_admin_user");
     if (adminRes.error) {
       setIsAdmin(false);
@@ -80,14 +79,13 @@ export default function AdminExercisesPage() {
       return;
     }
 
-    // Load exercises + slots via admin RPCs
+    // list exercises (admin rpc)
     const exRes = await supabase.rpc("admin_list_exercises");
     if (exRes.error) {
       setLoading(false);
       setMsg(exRes.error.message);
       return;
     }
-
     const list: Exercise[] = (exRes.data ?? []).map((r: any) => ({
       exercise_id: Number(r.exercise_id),
       canonical_name: String(r.canonical_name),
@@ -96,12 +94,13 @@ export default function AdminExercisesPage() {
       is_distance_based: !!r.is_distance_based,
       is_active: !!r.is_active,
     }));
+    setItems(list);
 
+    // slot codes (admin rpc)
     const slotRes = await supabase.rpc("admin_list_slot_codes");
     const codes = slotRes.error ? [] : (slotRes.data ?? []).map((r: any) => String(r.slot_code));
-
-    setItems(list);
     setSlotCodes(codes);
+
     if (!newSlot && codes.length) setNewSlot(codes[0]);
     if (!mapSlot && codes.length) setMapSlot(codes[0]);
 
@@ -113,11 +112,7 @@ export default function AdminExercisesPage() {
       const { data } = await supabase.auth.getSession();
       setIsAuthed(!!data.session);
     })();
-
-    const { data: sub } = supabase.auth.onAuthStateChange((_evt, session) => {
-      setIsAuthed(!!session);
-    });
-
+    const { data: sub } = supabase.auth.onAuthStateChange((_evt, session) => setIsAuthed(!!session));
     return () => sub.subscription.unsubscribe();
   }, []);
 
@@ -134,11 +129,11 @@ export default function AdminExercisesPage() {
     setEditManual(selected.is_manual_only);
     setEditDistance(selected.is_distance_based);
     setEditActive(selected.is_active);
-  }, [selectedId, selected]);
+  }, [selected]);
 
   const createExercise = async () => {
     setMsg("");
-    if (!isAdmin) return;
+    if (!isAdmin) return setMsg("Not authorized.");
 
     const name = newName.trim();
     if (!name) return setMsg("Enter a name.");
@@ -158,7 +153,6 @@ export default function AdminExercisesPage() {
     const newId = Number(res.data);
     if (!Number.isFinite(newId)) return setMsg("Create failed: invalid return.");
 
-    // Optional mapping
     if (newSlot.trim()) {
       const bw = newBaseWeight === "" ? 1 : Number(newBaseWeight);
       const baseWeight = Number.isFinite(bw) ? bw : 1;
@@ -180,6 +174,7 @@ export default function AdminExercisesPage() {
     setNewManual(false);
     setNewDistance(false);
     setNewActive(true);
+    setNewSlot("");
     setNewBaseWeight(1);
 
     await loadAll();
@@ -196,7 +191,6 @@ export default function AdminExercisesPage() {
 
     const dist = editType === 2 ? editDistance : false;
 
-    // If you don’t have admin_update_exercise yet, add it (we drafted it earlier).
     const res = await supabase.rpc("admin_update_exercise", {
       p_exercise_id: selected.exercise_id,
       p_exercise_type: editType,
@@ -248,12 +242,9 @@ export default function AdminExercisesPage() {
       {loading && <div style={{ marginBottom: 12 }}>Loading…</div>}
 
       {!isAdmin ? (
-        <div style={{ padding: 12, border: "1px solid #333", borderRadius: 8 }}>
-          Not authorized.
-        </div>
+        <div style={{ padding: 12, border: "1px solid #333", borderRadius: 8 }}>Not authorized.</div>
       ) : (
         <>
-          {/* Create */}
           <div style={{ padding: 12, border: "1px solid #222", borderRadius: 8, marginBottom: 14 }}>
             <b>Create exercise</b>
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 10, alignItems: "center" }}>
@@ -263,18 +254,15 @@ export default function AdminExercisesPage() {
                 placeholder="canonical_name"
                 style={{ padding: 10, minWidth: 280 }}
               />
-
               <select value={newType} onChange={(e) => setNewType(Number(e.target.value) as any)} style={{ padding: 10 }}>
                 <option value={1}>Strength</option>
                 <option value={2}>Cardio</option>
                 <option value={3}>Other</option>
               </select>
-
               <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
                 <input type="checkbox" checked={newManual} onChange={(e) => setNewManual(e.target.checked)} />
                 Manual-only
               </label>
-
               <label style={{ display: "flex", gap: 6, alignItems: "center", opacity: newType === 2 ? 1 : 0.5 }}>
                 <input
                   type="checkbox"
@@ -284,13 +272,12 @@ export default function AdminExercisesPage() {
                 />
                 Distance-based
               </label>
-
               <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
                 <input type="checkbox" checked={newActive} onChange={(e) => setNewActive(e.target.checked)} />
                 Active
               </label>
 
-              <select value={newSlot} onChange={(e) => setNewSlot(e.target.value)} style={{ padding: 10, minWidth: 200 }}>
+              <select value={newSlot} onChange={(e) => setNewSlot(e.target.value)} style={{ padding: 10, minWidth: 220 }}>
                 <option value="">(No slot mapping)</option>
                 {slotCodes.map((s) => (
                   <option key={s} value={s}>
@@ -301,13 +288,7 @@ export default function AdminExercisesPage() {
 
               <input
                 value={newBaseWeight === "" ? "" : String(newBaseWeight)}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  if (v === "") return setNewBaseWeight("");
-                  const n = Number(v);
-                  if (!Number.isFinite(n)) return;
-                  setNewBaseWeight(n);
-                }}
+                onChange={(e) => setNewBaseWeight(parseNumberOrBlank(e.target.value))}
                 placeholder="base_weight"
                 inputMode="decimal"
                 style={{ padding: 10, width: 140 }}
@@ -319,7 +300,6 @@ export default function AdminExercisesPage() {
             </div>
           </div>
 
-          {/* List + edit */}
           <div style={{ display: "grid", gridTemplateColumns: "380px 1fr", gap: 14 }}>
             <div style={{ padding: 12, border: "1px solid #222", borderRadius: 8 }}>
               <b>Exercises</b>
@@ -359,16 +339,10 @@ export default function AdminExercisesPage() {
                 <div style={{ marginTop: 10 }}>Pick an exercise from the list.</div>
               ) : (
                 <>
-                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 10, alignItems: "center" }}>
-                    <div style={{ color: "#777" }}>Selected ID: {selected.exercise_id}</div>
-                  </div>
+                  <div style={{ marginTop: 10, color: "#777" }}>Selected ID: {selected.exercise_id}</div>
 
                   <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 10, alignItems: "center" }}>
-                    <input
-                      value={editName}
-                      onChange={(e) => setEditName(e.target.value)}
-                      style={{ padding: 10, minWidth: 320 }}
-                    />
+                    <input value={editName} onChange={(e) => setEditName(e.target.value)} style={{ padding: 10, minWidth: 320 }} />
 
                     <select value={editType} onChange={(e) => setEditType(Number(e.target.value) as any)} style={{ padding: 10 }}>
                       <option value={1}>Strength</option>
@@ -415,13 +389,7 @@ export default function AdminExercisesPage() {
 
                       <input
                         value={mapBaseWeight === "" ? "" : String(mapBaseWeight)}
-                        onChange={(e) => {
-                          const v = e.target.value;
-                          if (v === "") return setMapBaseWeight("");
-                          const n = Number(v);
-                          if (!Number.isFinite(n)) return;
-                          setMapBaseWeight(n);
-                        }}
+                        onChange={(e) => setMapBaseWeight(parseNumberOrBlank(e.target.value))}
                         placeholder="base_weight"
                         inputMode="decimal"
                         style={{ padding: 10, width: 140 }}
@@ -430,9 +398,6 @@ export default function AdminExercisesPage() {
                       <button onClick={mapSlotToSelected} style={{ padding: "10px 14px" }}>
                         Map
                       </button>
-                    </div>
-                    <div style={{ color: "#777", marginTop: 8, fontSize: 12 }}>
-                      (This does an upsert/no-op if the mapping already exists.)
                     </div>
                   </div>
                 </>
