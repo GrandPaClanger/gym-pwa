@@ -110,6 +110,13 @@ export default function LogPage() {
 
   const [swapPick, setSwapPick] = useState<Record<string, number | "">>({});
 
+  // Create new exercise (on /log)
+  const [isAdmin, setIsAdmin] = useState<boolean>(true); // default true; if the admin RPC is missing we'll still show the UI
+  const [newExName, setNewExName] = useState<string>("");
+  const [newExType, setNewExType] = useState<1 | 2>(1);
+  const [newExManualOnly, setNewExManualOnly] = useState<boolean>(false);
+  const [newExDistanceBased, setNewExDistanceBased] = useState<boolean>(false);
+
   const signInMagicLink = async () => {
     setMsg("");
     const { error } = await supabase.auth.signInWithOtp({ email });
@@ -161,6 +168,16 @@ export default function LogPage() {
       is_active: !!r.is_active,
     }));
     setExerciseList(list);
+  };
+
+  const checkIsAdmin = async () => {
+    // If the RPC doesn't exist (or errors), we keep UI visible and rely on insert/RPC error handling.
+    const { data, error } = await supabase.rpc("is_admin_user");
+    if (error) {
+      setIsAdmin(true);
+      return;
+    }
+    setIsAdmin(!!data);
   };
 
   const exerciseById = useMemo(() => {
@@ -450,6 +467,75 @@ export default function LogPage() {
     setMsg("Exercise added.");
   };
 
+  const createExercise = async () => {
+    setMsg("");
+    const name = newExName.trim();
+    if (!name) {
+      setMsg("Enter a name for the new exercise.");
+      return;
+    }
+
+    const exType = newExType;
+    const dist = exType === 2 ? newExDistanceBased : false;
+
+    let newId: number | null = null;
+
+    // Try direct insert first (works if INSERT is permitted)
+    {
+      const { data, error } = await supabase
+        .from("exercise")
+        .insert({
+          canonical_name: name,
+          exercise_type: exType,
+          is_manual_only: newExManualOnly,
+          is_distance_based: dist,
+          is_active: true,
+        })
+        .select("exercise_id")
+        .single();
+
+      if (!error) {
+        const n = Number((data as any)?.exercise_id);
+        if (Number.isFinite(n)) newId = n;
+      }
+
+      // If blocked by RLS/permissions, fall through and try admin RPC
+      if (error && !newId) {
+        // no-op; we'll try the RPC below
+      }
+    }
+
+    // Fallback: admin RPC (if you've implemented it)
+    if (!newId) {
+      const { data, error } = await supabase.rpc("admin_create_exercise", {
+        p_canonical_name: name,
+        p_exercise_type: exType,
+        p_is_manual_only: newExManualOnly,
+        p_is_distance_based: dist,
+        p_is_active: true,
+      });
+      if (error) {
+        setMsg(`Create exercise failed: ${error.message}`);
+        return;
+      }
+      const n = Number(data);
+      if (!Number.isFinite(n)) {
+        setMsg("Create exercise failed: unexpected return value.");
+        return;
+      }
+      newId = n;
+    }
+
+    await loadExerciseList();
+    setAddExerciseQuery(name);
+    setAddExerciseId(newId);
+    setNewExName("");
+    setNewExType(1);
+    setNewExManualOnly(false);
+    setNewExDistanceBased(false);
+    setMsg("Exercise created.");
+  };
+
   const removeRow = async (sequence_no: number) => {
     setMsg("");
     const k = rowKey(todayIso(), sequence_no);
@@ -644,6 +730,7 @@ export default function LogPage() {
     if (!isAuthed) return;
     (async () => {
       await loadExerciseList();
+      await checkIsAdmin();
       await loadTodayPlanRows();
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -751,6 +838,61 @@ export default function LogPage() {
         <button onClick={addExercise} style={{ padding: "10px 14px" }}>
           Add
         </button>
+      </div>
+
+      <div
+        style={{
+          marginBottom: 14,
+          padding: 12,
+          border: "1px solid #222",
+          borderRadius: 8,
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+          <b>Create new exercise</b>
+          {!isAdmin && <span style={{ color: "#a66" }}>Not marked as admin — create may fail</span>}
+        </div>
+
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+          <input
+            value={newExName}
+            onChange={(e) => setNewExName(e.target.value)}
+            placeholder="New exercise name (canonical_name)"
+            style={{ padding: 10, minWidth: 320 }}
+          />
+
+          <select
+            value={newExType}
+            onChange={(e) => setNewExType(Number(e.target.value) === 2 ? 2 : 1)}
+            style={{ padding: 10, minWidth: 160 }}
+          >
+            <option value={1}>Strength</option>
+            <option value={2}>Cardio</option>
+          </select>
+
+          <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <input
+              type="checkbox"
+              checked={newExManualOnly}
+              onChange={(e) => setNewExManualOnly(e.target.checked)}
+            />
+            Manual-only
+          </label>
+
+          <label style={{ display: "flex", alignItems: "center", gap: 6, opacity: newExType === 2 ? 1 : 0.5 }}>
+            <input
+              type="checkbox"
+              checked={newExDistanceBased}
+              onChange={(e) => setNewExDistanceBased(e.target.checked)}
+              disabled={newExType !== 2}
+            />
+            Distance-based (Calories)
+          </label>
+
+          <button onClick={createExercise} style={{ padding: "10px 14px" }}>
+            Create
+          </button>
+        </div>
       </div>
 
       <div style={{ overflowX: "auto" }}>
