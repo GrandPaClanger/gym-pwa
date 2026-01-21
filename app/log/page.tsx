@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 
@@ -104,6 +105,11 @@ export default function LogPage() {
   const [sessionStart, setSessionStart] = useState("");
   const [sessionDurationMin, setSessionDurationMin] = useState<number>(60);
 
+  // Notes (stored in Supabase per session_start)
+  const [sessionNotes, setSessionNotes] = useState("");
+  const [notesMsg, setNotesMsg] = useState("");
+  const notesSaveTimer = useRef<any>(null);
+
   const autosaveTimers = useRef<Record<string, any>>({});
 
   const [sets, setSets] = useState<Record<string, number | "">>({});
@@ -151,6 +157,8 @@ export default function LogPage() {
     const fresh = new Date().toISOString();
     window.localStorage.setItem(k, fresh);
     setSessionStart(fresh);
+    setSessionNotes("");
+    setNotesMsg("");
     setMsg("New session started.");
   };
 
@@ -523,6 +531,36 @@ export default function LogPage() {
     setMsg("Swapped.");
   };
 
+  // Notes DB helpers
+  const loadNotesFromDb = async (ss: string) => {
+    setNotesMsg("");
+    if (!ss) return;
+
+    const { data, error } = await supabase
+      .from("workout_session_note")
+      .select("notes")
+      .eq("session_start", ss)
+      .maybeSingle();
+
+    if (error) {
+      setNotesMsg(error.message);
+      setSessionNotes("");
+      return;
+    }
+
+    setSessionNotes((data as any)?.notes ?? "");
+  };
+
+  const saveNotesToDb = async (ss: string, notes: string) => {
+    if (!ss) return;
+    const { error } = await supabase
+      .from("workout_session_note")
+      .upsert({ session_start: ss, notes }, { onConflict: "user_id,session_start" });
+
+    if (error) setNotesMsg(error.message);
+    else setNotesMsg("Saved.");
+  };
+
   const payload: RowPayload[] = useMemo(() => {
     const planDate = todayIso();
     const out: RowPayload[] = [];
@@ -587,10 +625,15 @@ export default function LogPage() {
       p_rows: payload,
     });
 
-    setMsg(error ? error.message : "Session saved.");
+    if (error) return setMsg(error.message);
+
+    // ensure notes are persisted when you hit Save session
+    await saveNotesToDb(ss, sessionNotes);
+
+    setMsg("Session saved.");
   };
 
-  // HARDENED AUTH INIT: never hang on "Checking sign-in…"
+  // Auth init (hardened)
   useEffect(() => {
     let mounted = true;
 
@@ -650,9 +693,18 @@ export default function LogPage() {
     (async () => {
       await loadExerciseList();
       await loadTodayPlanRows();
+      const ss = ensureSessionStart();
+      await loadNotesFromDb(ss);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAuthed]);
+
+  // whenever sessionStart changes, load notes for that session
+  useEffect(() => {
+    if (!isAuthed) return;
+    if (!sessionStart) return;
+    void loadNotesFromDb(sessionStart);
+  }, [isAuthed, sessionStart]);
 
   const filteredAddExercises = useMemo(() => {
     const q = addExerciseQuery.trim().toLowerCase();
@@ -697,7 +749,12 @@ export default function LogPage() {
 
   return (
     <main style={{ padding: 20, maxWidth: 1100, margin: "0 auto" }}>
-      <h1 style={{ marginBottom: 8 }}>Log session</h1>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+        <h1 style={{ marginBottom: 8 }}>Log session</h1>
+        <Link href="/" style={{ padding: "10px 14px", border: "1px solid #333", borderRadius: 6 }}>
+          ← Back to Today’s Plan
+        </Link>
+      </div>
 
       <div style={{ color: "#666", marginBottom: 12 }}>
         Date: <b>{todayIso()}</b> · Mode: <b>{mode === "plan" ? "Plan" : "Ad-hoc"}</b> · Plan ID:{" "}
@@ -809,8 +866,7 @@ export default function LogPage() {
                             onChange={(e) => {
                               const raw = parseNumberOrBlank(e.target.value);
                               setReps((prev) => ({ ...prev, [k]: raw }));
-                              if (raw !== "" && mode === "plan")
-                                queueAutosave(r.sequence_no, { target_reps: clampReps(raw) });
+                              if (raw !== "" && mode === "plan") queueAutosave(r.sequence_no, { target_reps: clampReps(raw) });
                             }}
                             style={{ width: 90, marginLeft: 6, padding: 6 }}
                           />
@@ -825,8 +881,7 @@ export default function LogPage() {
                             onChange={(e) => {
                               const raw = e.target.value;
                               setLoads((prev) => ({ ...prev, [k]: raw }));
-                              if (mode === "plan")
-                                queueAutosave(r.sequence_no, { target_load_kg: parseDecimalOrNull(raw) });
+                              if (mode === "plan") queueAutosave(r.sequence_no, { target_load_kg: parseDecimalOrNull(raw) });
                             }}
                             style={{ width: 110, marginLeft: 6, padding: 6 }}
                           />
@@ -841,8 +896,7 @@ export default function LogPage() {
                             onChange={(e) => {
                               const v = parseNumberOrBlank(e.target.value);
                               setSets((prev) => ({ ...prev, [k]: v }));
-                              if (v !== "" && mode === "plan")
-                                queueAutosave(r.sequence_no, { target_sets: Math.max(1, Math.round(v)) });
+                              if (v !== "" && mode === "plan") queueAutosave(r.sequence_no, { target_sets: Math.max(1, Math.round(v)) });
                             }}
                             style={{ width: 70, marginLeft: 6, padding: 6 }}
                           />
@@ -865,8 +919,7 @@ export default function LogPage() {
                             onChange={(e) => {
                               const v = parseNumberOrBlank(e.target.value);
                               setDurationsMin((prev) => ({ ...prev, [k]: v }));
-                              if (v !== "" && mode === "plan")
-                                queueAutosave(r.sequence_no, { target_duration_sec: Math.max(0, Math.round(v * 60)) });
+                              if (v !== "" && mode === "plan") queueAutosave(r.sequence_no, { target_duration_sec: Math.max(0, Math.round(v * 60)) });
                               if (v === "" && mode === "plan") queueAutosave(r.sequence_no, { target_duration_sec: 0 });
                             }}
                             style={{ width: 90, marginLeft: 6, padding: 6 }}
@@ -934,6 +987,35 @@ export default function LogPage() {
             )}
           </tbody>
         </table>
+      </div>
+
+      {/* Session Notes (after last exercise; autosaves to Supabase) */}
+      <div style={{ marginTop: 18 }}>
+        <h2 style={{ marginBottom: 8 }}>Session notes</h2>
+        <textarea
+          value={sessionNotes}
+          onChange={(e) => {
+            const v = e.target.value;
+            setSessionNotes(v);
+            setNotesMsg("");
+
+            const ss = sessionStart || ensureSessionStart();
+
+            if (notesSaveTimer.current) clearTimeout(notesSaveTimer.current);
+            notesSaveTimer.current = setTimeout(() => {
+              void saveNotesToDb(ss, v);
+            }, 600);
+          }}
+          placeholder="Quick notes for this session… e.g. new exercise idea, setup, machine settings, anything to add later."
+          style={{
+            width: "100%",
+            minHeight: 130,
+            padding: 10,
+            borderRadius: 8,
+            border: "1px solid #333",
+          }}
+        />
+        {notesMsg && <div style={{ marginTop: 6, color: "#666" }}>{notesMsg}</div>}
       </div>
     </main>
   );
