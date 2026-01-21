@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
 
@@ -42,7 +43,10 @@ export default function AdminExercisesPage() {
   const [newBaseWeight, setNewBaseWeight] = useState<number | "">(1);
 
   // Edit
-  const selected = useMemo(() => items.find((x) => x.exercise_id === selectedId) ?? null, [items, selectedId]);
+  const selected = useMemo(
+    () => items.find((x) => x.exercise_id === selectedId) ?? null,
+    [items, selectedId]
+  );
   const [editName, setEditName] = useState("");
   const [editType, setEditType] = useState<1 | 2 | 3>(1);
   const [editManual, setEditManual] = useState(false);
@@ -225,10 +229,19 @@ export default function AdminExercisesPage() {
     setMsg("Mapped.");
   };
 
+  const headerRow = (
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+      <h1 style={{ marginBottom: 10 }}>Admin · Exercises</h1>
+      <Link href="/" style={{ padding: "10px 14px", border: "1px solid #333", borderRadius: 6 }}>
+        ← Back to Today’s Plan
+      </Link>
+    </div>
+  );
+
   if (!isAuthed) {
     return (
       <main style={{ padding: 20, maxWidth: 1100, margin: "0 auto" }}>
-        <h1>Admin · Exercises</h1>
+        {headerRow}
         <p>Please sign in first (use /log).</p>
       </main>
     );
@@ -236,7 +249,7 @@ export default function AdminExercisesPage() {
 
   return (
     <main style={{ padding: 20, maxWidth: 1100, margin: "0 auto" }}>
-      <h1 style={{ marginBottom: 10 }}>Admin · Exercises</h1>
+      {headerRow}
 
       {msg && <div style={{ marginBottom: 12 }}>{msg}</div>}
       {loading && <div style={{ marginBottom: 12 }}>Loading…</div>}
@@ -342,7 +355,11 @@ export default function AdminExercisesPage() {
                   <div style={{ marginTop: 10, color: "#777" }}>Selected ID: {selected.exercise_id}</div>
 
                   <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 10, alignItems: "center" }}>
-                    <input value={editName} onChange={(e) => setEditName(e.target.value)} style={{ padding: 10, minWidth: 320 }} />
+                    <input
+                      value={editName}
+                      onChange={(e) => setEditName(e.target.value)}
+                      style={{ padding: 10, minWidth: 320 }}
+                    />
 
                     <select value={editType} onChange={(e) => setEditType(Number(e.target.value) as any)} style={{ padding: 10 }}>
                       <option value={1}>Strength</option>
