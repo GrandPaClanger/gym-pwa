@@ -10,32 +10,12 @@ export default function AuthCallbackPage() {
 
   useEffect(() => {
     (async () => {
-      const url = new URL(window.location.href);
-      const code = url.searchParams.get("code");
-      const err = url.searchParams.get("error");
-      const errDesc = url.searchParams.get("error_description");
+      // With implicit + detectSessionInUrl, tokens are parsed automatically
+      await new Promise((r) => setTimeout(r, 50));
 
-      if (err) {
-        setMsg(`${err}: ${errDesc ?? ""}`);
-        return;
-      }
-
-      if (!code) {
-        setMsg("Missing ?code= in callback URL (redirect misconfigured).");
-        return;
-      }
-
-      const { error } = await supabase.auth.exchangeCodeForSession(code);
-      if (error) {
-        setMsg(`exchange failed: ${error.message}`);
-        return;
-      }
-
-      const { data } = await supabase.auth.getSession();
-      if (!data.session) {
-        setMsg("Exchange succeeded but session is still null (persistSession/storage issue).");
-        return;
-      }
+      const { data, error } = await supabase.auth.getSession();
+      if (error) return setMsg(error.message);
+      if (!data.session) return setMsg("No session found after callback.");
 
       router.replace("/");
     })();
