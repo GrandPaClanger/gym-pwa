@@ -105,7 +105,7 @@ export default function LogPage() {
   const [sessionStart, setSessionStart] = useState("");
   const [sessionDurationMin, setSessionDurationMin] = useState<number>(60);
 
-  // Notes (stored in Supabase per session_start)
+  // Session notes (stored in Supabase per session_start)
   const [sessionNotes, setSessionNotes] = useState("");
   const [notesMsg, setNotesMsg] = useState("");
   const notesSaveTimer = useRef<any>(null);
@@ -123,6 +123,11 @@ export default function LogPage() {
   const [addExerciseQuery, setAddExerciseQuery] = useState("");
 
   const [swapPick, setSwapPick] = useState<Record<string, number | "">>({});
+
+  // NEW: per-exercise quick notes (one per exercise_id, shown every time)
+  const [exerciseNotes, setExerciseNotes] = useState<Record<number, string>>({});
+  const noteTimers = useRef<Record<number, any>>({});
+  const [exNoteMsg, setExNoteMsg] = useState("");
 
   const signInMagicLink = async () => {
     setMsg("");
@@ -531,7 +536,7 @@ export default function LogPage() {
     setMsg("Swapped.");
   };
 
-  // Notes DB helpers
+  // Session notes DB helpers
   const loadNotesFromDb = async (ss: string) => {
     setNotesMsg("");
     if (!ss) return;
@@ -559,6 +564,42 @@ export default function LogPage() {
 
     if (error) setNotesMsg(error.message);
     else setNotesMsg("Saved.");
+  };
+
+  // NEW: load per-exercise notes for this user/person
+  const loadExerciseNotes = async () => {
+    setExNoteMsg("");
+    const { data, error } = await supabase.rpc("my_exercise_notes");
+    if (error) {
+      setExNoteMsg(error.message);
+      return;
+    }
+
+    const m: Record<number, string> = {};
+    for (const r of (data as any[]) ?? []) {
+      const id = Number(r.exercise_id);
+      if (!Number.isFinite(id)) continue;
+      m[id] = String(r.note ?? "");
+    }
+    setExerciseNotes(m);
+  };
+
+  const queueSaveExerciseNote = (exercise_id: number, note: string) => {
+    setExNoteMsg("");
+    if (noteTimers.current[exercise_id]) clearTimeout(noteTimers.current[exercise_id]);
+
+    noteTimers.current[exercise_id] = setTimeout(async () => {
+      noteTimers.current[exercise_id] = null;
+
+      const trimmed = note.trim().slice(0, 30);
+      const { error } = await supabase.rpc("set_exercise_note", {
+        p_exercise_id: exercise_id,
+        p_note: trimmed,
+      });
+
+      if (error) setExNoteMsg(error.message);
+      else setExNoteMsg("Exercise note saved.");
+    }, 500);
   };
 
   const payload: RowPayload[] = useMemo(() => {
@@ -695,6 +736,7 @@ export default function LogPage() {
       await loadTodayPlanRows();
       const ss = ensureSessionStart();
       await loadNotesFromDb(ss);
+      await loadExerciseNotes(); // NEW
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAuthed]);
@@ -758,70 +800,68 @@ export default function LogPage() {
 
       <div style={{ color: "#666", marginBottom: 12 }}>
         Date: <b>{todayIso()}</b> · Mode: <b>{mode === "plan" ? "Plan" : "Ad-hoc"}</b> · Plan ID:{" "}
-        <b>{planId ?? "(none)"}</b> · Session start: <b>{sessionStart || "(not set)"}</b>
+        <b>{planId ?? "—"}</b>
       </div>
 
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginBottom: 14 }}>
-        <button onClick={loadTodayPlanRows} style={{ padding: "10px 14px" }}>
-          Load Today&apos;s Plan
-        </button>
-        <button onClick={startAdhocWorkout} style={{ padding: "10px 14px" }}>
-          New Ad-hoc Workout
-        </button>
         <button onClick={refreshPlan} style={{ padding: "10px 14px" }}>
           Refresh plan
         </button>
+        <button onClick={startAdhocWorkout} style={{ padding: "10px 14px" }}>
+          Ad-hoc workout
+        </button>
+
         <button onClick={newSession} style={{ padding: "10px 14px" }}>
           New session
         </button>
 
-        <label style={{ marginLeft: 6 }}>
-          Duration (min):{" "}
+        <label style={{ marginLeft: 10 }}>
+          Duration (min):
           <input
             type="text"
             inputMode="numeric"
             value={String(sessionDurationMin)}
-            onChange={(e) => {
-              const v = parseNumberOrBlank(e.target.value);
-              setSessionDurationMin(v === "" ? 0 : Math.max(0, Math.round(v)));
-            }}
-            style={{ width: 90, padding: 6 }}
+            onChange={(e) => setSessionDurationMin(Number(parseNumberOrBlank(e.target.value) || 0))}
+            style={{ width: 90, marginLeft: 6, padding: 6 }}
           />
         </label>
 
-        <button onClick={saveSession} style={{ padding: "10px 14px", marginLeft: 6 }}>
+        <button onClick={saveSession} style={{ padding: "10px 14px" }}>
           Save session
         </button>
+
+        {msg && <span style={{ marginLeft: 8 }}>{msg}</span>}
       </div>
 
-      {msg && <div style={{ marginBottom: 14 }}>{msg}</div>}
+      <div style={{ padding: 12, border: "1px solid #222", borderRadius: 8, marginBottom: 14 }}>
+        <b>Add exercise</b>
+        <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+          <input
+            value={addExerciseQuery}
+            onChange={(e) => setAddExerciseQuery(e.target.value)}
+            placeholder="Search…"
+            style={{ padding: 10, minWidth: 280 }}
+          />
 
-      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginBottom: 14 }}>
-        <input
-          value={addExerciseQuery}
-          onChange={(e) => setAddExerciseQuery(e.target.value)}
-          placeholder="Type to filter…"
-          style={{ padding: 10, minWidth: 320 }}
-        />
+          <select
+            value={addExerciseId === "" ? "" : String(addExerciseId)}
+            onChange={(e) => setAddExerciseId(e.target.value ? Number(e.target.value) : "")}
+            style={{ padding: 10, minWidth: 320 }}
+          >
+            <option value="">Select…</option>
+            {filteredAddExercises.map((e) => (
+              <option key={e.exercise_id} value={e.exercise_id}>
+                {e.canonical_name}
+                {e.is_manual_only ? " (manual)" : ""}
+                {e.is_distance_based ? " (distance)" : ""}
+              </option>
+            ))}
+          </select>
 
-        <select
-          value={addExerciseId}
-          onChange={(e) => setAddExerciseId(e.target.value === "" ? "" : Number(e.target.value))}
-          style={{ padding: 10, minWidth: 320 }}
-        >
-          <option value="">Select exercise…</option>
-          {filteredAddExercises.map((e) => (
-            <option key={e.exercise_id} value={e.exercise_id}>
-              {e.canonical_name}
-              {e.is_manual_only ? " (manual)" : ""}
-              {e.is_distance_based ? " (distance)" : ""}
-            </option>
-          ))}
-        </select>
-
-        <button onClick={addExercise} style={{ padding: "10px 14px" }}>
-          Add
-        </button>
+          <button onClick={addExercise} style={{ padding: "10px 14px" }}>
+            Add
+          </button>
+        </div>
       </div>
 
       <div style={{ overflowX: "auto" }}>
@@ -849,100 +889,129 @@ export default function LogPage() {
               const showCalories = (caloriesKcal[k] ?? "") as number | "";
               const showCaloriesField = isDistanceBasedRow(r);
 
+              const exId = r.exercise_id ?? null;
+              const exNoteVal = exId ? (exerciseNotes[exId] ?? "") : "";
+
               return (
                 <tr key={k}>
                   <td style={td}>{r.sequence_no}</td>
+
                   <td style={td}>
-                    <b>{r.exercise_name}</b>
-
-                    {r.exercise_type === 1 && (
-                      <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap" }}>
-                        <label>
-                          Reps:
-                          <input
-                            type="text"
-                            inputMode="numeric"
-                            value={showReps === "" ? "" : String(showReps)}
-                            onChange={(e) => {
-                              const raw = parseNumberOrBlank(e.target.value);
-                              setReps((prev) => ({ ...prev, [k]: raw }));
-                              if (raw !== "" && mode === "plan") queueAutosave(r.sequence_no, { target_reps: clampReps(raw) });
-                            }}
-                            style={{ width: 90, marginLeft: 6, padding: 6 }}
-                          />
-                        </label>
-
-                        <label>
-                          Load (kg):
-                          <input
-                            type="text"
-                            inputMode="decimal"
-                            value={showLoad}
-                            onChange={(e) => {
-                              const raw = e.target.value;
-                              setLoads((prev) => ({ ...prev, [k]: raw }));
-                              if (mode === "plan") queueAutosave(r.sequence_no, { target_load_kg: parseDecimalOrNull(raw) });
-                            }}
-                            style={{ width: 110, marginLeft: 6, padding: 6 }}
-                          />
-                        </label>
-
-                        <label>
-                          Sets:
-                          <input
-                            type="text"
-                            inputMode="numeric"
-                            value={showSets === "" ? "" : String(showSets)}
-                            onChange={(e) => {
-                              const v = parseNumberOrBlank(e.target.value);
-                              setSets((prev) => ({ ...prev, [k]: v }));
-                              if (v !== "" && mode === "plan") queueAutosave(r.sequence_no, { target_sets: Math.max(1, Math.round(v)) });
-                            }}
-                            style={{ width: 70, marginLeft: 6, padding: 6 }}
-                          />
-                        </label>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                      <div>
+                        <b>{r.exercise_name}</b>
                       </div>
-                    )}
 
-                    {r.exercise_type === 2 && (
-                      <div style={{ marginTop: 10, display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
-                        <div>
-                          Target: <b>{targetMin} min</b>
+                      {/* NEW: quick exercise note (saved once per exercise_id, shows every time) */}
+                      {exId != null && (
+                        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                          <label style={{ color: "#888" }}>
+                            Note:
+                            <input
+                              type="text"
+                              value={exNoteVal}
+                              maxLength={30}
+                              onChange={(e) => {
+                                const v = e.target.value.slice(0, 30);
+                                setExerciseNotes((prev) => ({ ...prev, [exId]: v }));
+                                queueSaveExerciseNote(exId, v);
+                              }}
+                              placeholder='e.g. "2 sets @10, 1 @9"'
+                              style={{ width: 260, marginLeft: 6, padding: 6 }}
+                            />
+                          </label>
                         </div>
+                      )}
 
-                        <label>
-                          Duration (min):
-                          <input
-                            type="text"
-                            inputMode="numeric"
-                            value={showMin === "" ? "" : String(showMin)}
-                            onChange={(e) => {
-                              const v = parseNumberOrBlank(e.target.value);
-                              setDurationsMin((prev) => ({ ...prev, [k]: v }));
-                              if (v !== "" && mode === "plan") queueAutosave(r.sequence_no, { target_duration_sec: Math.max(0, Math.round(v * 60)) });
-                              if (v === "" && mode === "plan") queueAutosave(r.sequence_no, { target_duration_sec: 0 });
-                            }}
-                            style={{ width: 90, marginLeft: 6, padding: 6 }}
-                          />
-                        </label>
-
-                        {showCaloriesField && (
+                      {r.exercise_type === 1 && (
+                        <div style={{ marginTop: 2, display: "flex", gap: 10, flexWrap: "wrap" }}>
                           <label>
-                            Calories (kcal):
+                            Reps:
                             <input
                               type="text"
                               inputMode="numeric"
-                              value={showCalories === "" ? "" : String(showCalories)}
+                              value={showReps === "" ? "" : String(showReps)}
                               onChange={(e) => {
-                                const v = parseNumberOrBlank(e.target.value);
-                                setCaloriesKcal((prev) => ({ ...prev, [k]: v }));
+                                const raw = parseNumberOrBlank(e.target.value);
+                                setReps((prev) => ({ ...prev, [k]: raw }));
+                                if (raw !== "" && mode === "plan") queueAutosave(r.sequence_no, { target_reps: clampReps(raw) });
                               }}
-                              style={{ width: 120, marginLeft: 6, padding: 6 }}
+                              style={{ width: 90, marginLeft: 6, padding: 6 }}
                             />
                           </label>
-                        )}
-                      </div>
-                    )}
+
+                          <label>
+                            Load (kg):
+                            <input
+                              type="text"
+                              inputMode="decimal"
+                              value={showLoad}
+                              onChange={(e) => {
+                                const raw = e.target.value;
+                                setLoads((prev) => ({ ...prev, [k]: raw }));
+                                if (mode === "plan") queueAutosave(r.sequence_no, { target_load_kg: parseDecimalOrNull(raw) });
+                              }}
+                              style={{ width: 110, marginLeft: 6, padding: 6 }}
+                            />
+                          </label>
+
+                          <label>
+                            Sets:
+                            <input
+                              type="text"
+                              inputMode="numeric"
+                              value={showSets === "" ? "" : String(showSets)}
+                              onChange={(e) => {
+                                const v = parseNumberOrBlank(e.target.value);
+                                setSets((prev) => ({ ...prev, [k]: v }));
+                                if (v !== "" && mode === "plan") queueAutosave(r.sequence_no, { target_sets: Math.max(1, Math.round(v)) });
+                              }}
+                              style={{ width: 70, marginLeft: 6, padding: 6 }}
+                            />
+                          </label>
+                        </div>
+                      )}
+
+                      {r.exercise_type === 2 && (
+                        <div style={{ marginTop: 2, display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+                          <div>
+                            Target: <b>{targetMin} min</b>
+                          </div>
+
+                          <label>
+                            Duration (min):
+                            <input
+                              type="text"
+                              inputMode="numeric"
+                              value={showMin === "" ? "" : String(showMin)}
+                              onChange={(e) => {
+                                const v = parseNumberOrBlank(e.target.value);
+                                setDurationsMin((prev) => ({ ...prev, [k]: v }));
+                                if (v !== "" && mode === "plan") queueAutosave(r.sequence_no, { target_duration_sec: Math.max(0, Math.round(v * 60)) });
+                                if (v === "" && mode === "plan") queueAutosave(r.sequence_no, { target_duration_sec: 0 });
+                              }}
+                              style={{ width: 90, marginLeft: 6, padding: 6 }}
+                            />
+                          </label>
+
+                          {showCaloriesField && (
+                            <label>
+                              Calories (kcal):
+                              <input
+                                type="text"
+                                inputMode="numeric"
+                                value={showCalories === "" ? "" : String(showCalories)}
+                                onChange={(e) => {
+                                  const v = parseNumberOrBlank(e.target.value);
+                                  setCaloriesKcal((prev) => ({ ...prev, [k]: v }));
+                                }}
+                                style={{ width: 120, marginLeft: 6, padding: 6 }}
+                              />
+                            </label>
+                          )}
+                        </div>
+                      )}
+                    </div>
                   </td>
 
                   <td style={td}>
@@ -977,45 +1046,38 @@ export default function LogPage() {
                 </tr>
               );
             })}
-
-            {rows.length === 0 && (
-              <tr>
-                <td style={td} colSpan={3}>
-                  No rows. Use <b>Add</b> to build your workout.
-                </td>
-              </tr>
-            )}
           </tbody>
         </table>
       </div>
 
-      {/* Session Notes (after last exercise; autosaves to Supabase) */}
-      <div style={{ marginTop: 18 }}>
-        <h2 style={{ marginBottom: 8 }}>Session notes</h2>
-        <textarea
-          value={sessionNotes}
-          onChange={(e) => {
-            const v = e.target.value;
-            setSessionNotes(v);
-            setNotesMsg("");
+      {/* tiny status line for note saves */}
+      {(exNoteMsg || notesMsg) && (
+        <div style={{ marginTop: 10, color: "#777" }}>
+          {exNoteMsg ? <span>{exNoteMsg}</span> : null}
+          {exNoteMsg && notesMsg ? <span> · </span> : null}
+          {notesMsg ? <span>{notesMsg}</span> : null}
+        </div>
+      )}
 
-            const ss = sessionStart || ensureSessionStart();
+      <div style={{ marginTop: 18, padding: 12, border: "1px solid #222", borderRadius: 8 }}>
+        <b>Session notes</b>
+        <div style={{ marginTop: 8 }}>
+          <textarea
+            value={sessionNotes}
+            onChange={(e) => {
+              const v = e.target.value;
+              setSessionNotes(v);
 
-            if (notesSaveTimer.current) clearTimeout(notesSaveTimer.current);
-            notesSaveTimer.current = setTimeout(() => {
-              void saveNotesToDb(ss, v);
-            }, 600);
-          }}
-          placeholder="Quick notes for this session… e.g. new exercise idea, setup, machine settings, anything to add later."
-          style={{
-            width: "100%",
-            minHeight: 130,
-            padding: 10,
-            borderRadius: 8,
-            border: "1px solid #333",
-          }}
-        />
-        {notesMsg && <div style={{ marginTop: 6, color: "#666" }}>{notesMsg}</div>}
+              if (notesSaveTimer.current) clearTimeout(notesSaveTimer.current);
+              notesSaveTimer.current = setTimeout(() => {
+                const ss = sessionStart || ensureSessionStart();
+                void saveNotesToDb(ss, v);
+              }, 600);
+            }}
+            placeholder="Notes for this session…"
+            style={{ width: "100%", minHeight: 90, padding: 10 }}
+          />
+        </div>
       </div>
     </main>
   );
