@@ -40,6 +40,7 @@ export default function HomePage() {
   const [isAdmin, setIsAdmin] = useState(false);
   const [msg, setMsg] = useState("");
   const [loading, setLoading] = useState(true);
+  const [loadingStuck, setLoadingStuck] = useState(false);
   const [rows, setRows] = useState<TodayRow[]>([]);
 
   const checkIsAdmin = async () => {
@@ -107,17 +108,22 @@ export default function HomePage() {
   };
 
   useEffect(() => {
+    // Safety valve: if still loading after 6 seconds, surface an escape hatch
+    const stuckTimer = setTimeout(() => setLoadingStuck(true), 6000);
+
     (async () => {
       const { data } = await supabase.auth.getSession();
       const ok = !!data.session;
       setIsAuthed(ok);
       if (!ok) {
+        clearTimeout(stuckTimer);
         setLoading(false);
         router.replace("/log");
         return;
       }
       await checkIsAdmin();
       await loadToday();
+      clearTimeout(stuckTimer);
     })();
 
     const { data: sub } = supabase.auth.onAuthStateChange(async (_evt, session) => {
@@ -134,7 +140,10 @@ export default function HomePage() {
       await loadToday();
     });
 
-    return () => sub.subscription.unsubscribe();
+    return () => {
+      clearTimeout(stuckTimer);
+      sub.subscription.unsubscribe();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -176,22 +185,25 @@ export default function HomePage() {
         </div>
 
         {/* Action buttons */}
-        {isAuthed && (
-          <div className="flex gap-2 flex-wrap items-center">
-            <button onClick={generateRegenerate} className="btn-secondary" disabled={!isAuthed}>
-              Generate / Regenerate
-            </button>
-            <button onClick={generateEmptyPlan} className="btn-secondary" disabled={!isAuthed}>
-              Empty Plan
-            </button>
-            <button onClick={refresh} className="btn-ghost" disabled={!isAuthed}>
-              Refresh
-            </button>
-            <button onClick={signOut} className="btn-ghost ml-auto" disabled={!isAuthed}>
-              Sign out
-            </button>
-          </div>
-        )}
+        <div className="flex gap-2 flex-wrap items-center">
+          {isAuthed && (
+            <>
+              <button onClick={generateRegenerate} className="btn-secondary" disabled={!isAuthed}>
+                Generate / Regenerate
+              </button>
+              <button onClick={generateEmptyPlan} className="btn-secondary" disabled={!isAuthed}>
+                Empty Plan
+              </button>
+              <button onClick={refresh} className="btn-ghost" disabled={!isAuthed}>
+                Refresh
+              </button>
+            </>
+          )}
+          {/* Sign out always visible so user is never trapped */}
+          <button onClick={signOut} className="btn-ghost ml-auto">
+            Sign out
+          </button>
+        </div>
 
         {/* Status message */}
         {msg && (
@@ -201,13 +213,24 @@ export default function HomePage() {
         )}
 
         {/* Loading */}
-        {loading && (
+        {loading && !loadingStuck && (
           <div className="card flex items-center gap-3 text-slate-400">
             <svg className="animate-spin h-4 w-4 text-blue-500 shrink-0" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
               <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
               <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
             </svg>
             Loading plan…
+          </div>
+        )}
+
+        {/* Escape hatch if loading hangs */}
+        {loading && loadingStuck && (
+          <div className="card space-y-3 text-center">
+            <p className="text-slate-300">Taking longer than expected…</p>
+            <p className="text-sm text-slate-500">Your session may have expired.</p>
+            <button onClick={signOut} className="btn-primary">
+              Sign out and start fresh
+            </button>
           </div>
         )}
 

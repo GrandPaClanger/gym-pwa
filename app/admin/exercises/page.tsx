@@ -23,6 +23,7 @@ function parseNumberOrBlank(v: string): number | "" {
 
 export default function AdminExercisesPage() {
   const [isAuthed, setIsAuthed] = useState(false);
+  const [authReady, setAuthReady] = useState(false); // don't render until session check done
   const [isAdmin, setIsAdmin] = useState(false);
   const [msg, setMsg] = useState("");
   const [loading, setLoading] = useState(true);
@@ -122,8 +123,12 @@ export default function AdminExercisesPage() {
     (async () => {
       const { data } = await supabase.auth.getSession();
       setIsAuthed(!!data.session);
+      setAuthReady(true);
     })();
-    const { data: sub } = supabase.auth.onAuthStateChange((_evt, session) => setIsAuthed(!!session));
+    const { data: sub } = supabase.auth.onAuthStateChange((_evt, session) => {
+      setIsAuthed(!!session);
+      setAuthReady(true);
+    });
     return () => sub.subscription.unsubscribe();
   }, []);
 
@@ -238,6 +243,21 @@ export default function AdminExercisesPage() {
 
   const typeLabel = (t: 1 | 2 | 3) => ({ 1: "Strength", 2: "Cardio", 3: "Other" }[t] ?? "—");
   const typeBadgeClass = (t: 1 | 2 | 3) => ({ 1: "badge-blue", 2: "badge-green", 3: "badge-slate" }[t] ?? "badge-slate");
+
+  // Wait for session check before deciding — prevents flash of "Please sign in"
+  if (!authReady) {
+    return (
+      <main className="min-h-screen bg-gym-bg flex items-center justify-center">
+        <div className="card text-center space-y-3">
+          <svg className="animate-spin h-6 w-6 text-blue-500 mx-auto" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+          </svg>
+          <p className="text-slate-400">Checking session…</p>
+        </div>
+      </main>
+    );
+  }
 
   if (!isAuthed) {
     return (
