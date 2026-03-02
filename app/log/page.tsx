@@ -167,7 +167,7 @@ export default function LogPage() {
     setMsg("New session started.");
   };
 
-  const loadExerciseList = async () => {
+  const loadExerciseList = async (): Promise<Exercise[]> => {
     const { data, error } = await supabase
       .from("exercise")
       .select("exercise_id, canonical_name, exercise_type, is_manual_only, is_distance_based, is_active")
@@ -177,7 +177,7 @@ export default function LogPage() {
     if (error) {
       setMsg(error.message);
       setExerciseList([]);
-      return;
+      return [];
     }
 
     const list = ((data as Exercise[]) ?? []).map<Exercise>((r) => ({
@@ -189,6 +189,7 @@ export default function LogPage() {
       is_active: !!r.is_active,
     }));
     setExerciseList(list);
+    return list;
   };
 
   const exerciseById = useMemo(() => {
@@ -283,7 +284,7 @@ export default function LogPage() {
     });
   };
 
-  const loadTodayPlanRows = async () => {
+  const loadTodayPlanRows = async (freshList?: Exercise[]) => {
     setMsg("");
     const planDate = todayIso();
 
@@ -298,8 +299,14 @@ export default function LogPage() {
       return;
     }
 
+    // If a freshList is passed (on initial load), build the name map from it directly
+    // so we don't rely on the stale exerciseByName memo before React re-renders.
+    const nameMap = freshList
+      ? new Map(freshList.map((e) => [normName(e.canonical_name), e]))
+      : exerciseByName;
+
     const src = ((data as PlanRowFromView[]) ?? []).map<Row>((r) => {
-      const recoveredId = r.exercise_id ?? exerciseByName.get(normName(r.exercise_name))?.exercise_id ?? null;
+      const recoveredId = r.exercise_id ?? nameMap.get(normName(r.exercise_name))?.exercise_id ?? null;
       return {
         source: "plan",
         plan_date: planDate,
@@ -741,8 +748,8 @@ export default function LogPage() {
   useEffect(() => {
     if (!isAuthed) return;
     (async () => {
-      await loadExerciseList();
-      await loadTodayPlanRows();
+      const freshList = await loadExerciseList();
+      await loadTodayPlanRows(freshList);
       const ss = ensureSessionStart();
       await loadNotesFromDb(ss);
       await loadExerciseNotes();
