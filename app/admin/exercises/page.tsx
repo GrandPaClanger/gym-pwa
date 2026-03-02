@@ -351,7 +351,7 @@ export default function AdminExercisesPage() {
                 </div>
               </div>
 
-              <button onClick={void createExercise} className="btn-primary">
+              <button onClick={() => void createExercise()} className="btn-primary">
                 Create Exercise
               </button>
             </div>
@@ -445,7 +445,7 @@ export default function AdminExercisesPage() {
                         </label>
                       </div>
 
-                      <button onClick={void saveEdits} className="btn-primary">
+                      <button onClick={() => void saveEdits()} className="btn-primary">
                         Save Changes
                       </button>
                     </div>
@@ -473,7 +473,7 @@ export default function AdminExercisesPage() {
                           />
                         </div>
 
-                        <button onClick={void mapSlotToSelected} className="btn-secondary">
+                        <button onClick={() => void mapSlotToSelected()} className="btn-secondary">
                           Map
                         </button>
                       </div>

@@ -800,7 +800,7 @@ export default function LogPage() {
                 onKeyDown={(e) => { if (e.key === "Enter") void signInMagicLink(); }}
               />
             </div>
-            <button onClick={void signInMagicLink} className="btn-primary w-full">
+            <button onClick={() => void signInMagicLink()} className="btn-primary w-full">
               Send magic link
             </button>
           </div>
@@ -839,7 +839,7 @@ export default function LogPage() {
 
         {/* Toolbar */}
         <div className="flex gap-2 flex-wrap items-center">
-          <button onClick={void refreshPlan} className="btn-secondary">
+          <button onClick={() => void refreshPlan()} className="btn-secondary">
             Refresh plan
           </button>
           <button onClick={startAdhocWorkout} className="btn-secondary">
@@ -892,7 +892,7 @@ export default function LogPage() {
                 </option>
               ))}
             </select>
-            <button onClick={void addExercise} className="btn-primary shrink-0">
+            <button onClick={() => void addExercise()} className="btn-primary shrink-0">
               Add
             </button>
           </div>
@@ -1113,7 +1113,7 @@ export default function LogPage() {
       {/* Sticky save footer */}
       <div className="fixed bottom-0 left-0 right-0 border-t border-slate-700 bg-slate-900/95 backdrop-blur-sm px-4 py-3">
         <div className="max-w-2xl mx-auto">
-          <button onClick={void saveSession} className="btn-primary w-full text-base py-3">
+          <button onClick={() => void saveSession()} className="btn-primary w-full text-base py-3">
             Save Session
           </button>
         </div>

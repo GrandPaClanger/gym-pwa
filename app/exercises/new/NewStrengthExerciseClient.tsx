@@ -110,7 +110,7 @@ export default function NewStrengthExerciseClient({ returnTo }: { returnTo: stri
 
           <div className="flex gap-3 pt-1">
             <button
-              onClick={void save}
+              onClick={() => void save()}
               disabled={saving}
               className="btn-primary flex-1"
             >
