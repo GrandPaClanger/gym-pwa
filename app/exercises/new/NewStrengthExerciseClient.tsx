@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { supabase } from "@/lib/supabase";
 
 type Slot = { slot_code: string };
@@ -66,56 +67,60 @@ export default function NewStrengthExerciseClient({ returnTo }: { returnTo: stri
   };
 
   return (
-    <main style={{ padding: 20, maxWidth: 700, margin: "0 auto", fontFamily: "system-ui, sans-serif" }}>
-      <h1 style={{ marginTop: 0 }}>Add Strength Exercise</h1>
-
-      <div style={{ display: "grid", gap: 10 }}>
-        <label>
-          Name
-          <input
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="e.g. Seated Row (Machine)"
-            style={{ width: "100%", padding: 10, marginTop: 6 }}
-          />
-        </label>
-
-        <label>
-          Slot (optional)
-          <select
-            value={slotCode}
-            onChange={(e) => setSlotCode(e.target.value)}
-            style={{ width: "100%", padding: 10, marginTop: 6 }}
-          >
-            <option value="">(no slot)</option>
-            {slots.map((s) => (
-              <option key={s.slot_code} value={s.slot_code}>
-                {s.slot_code}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <div style={{ display: "flex", gap: 10 }}>
-          <button onClick={save} disabled={saving} style={{ padding: "10px 14px" }}>
-            {saving ? "Saving..." : "Save"}
-          </button>
-
-          <a
-            href={backTo}
-            style={{
-              padding: "10px 14px",
-              textDecoration: "none",
-              border: "1px solid #ddd",
-              borderRadius: 8,
-              color: "inherit",
-            }}
-          >
-            Cancel
-          </a>
+    <main className="min-h-screen bg-gym-bg flex items-start justify-center p-4 pt-12">
+      <div className="card max-w-md w-full space-y-5">
+        <div>
+          <p className="section-title">Exercises</p>
+          <h1 className="text-2xl font-bold text-slate-100 mt-0.5">Add Strength Exercise</h1>
         </div>
 
-        {msg && <div style={{ color: "#b00020" }}>{msg}</div>}
+        <div className="space-y-4">
+          <div>
+            <label className="label">Name</label>
+            <input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="e.g. Seated Row (Machine)"
+              className="input"
+              onKeyDown={(e) => { if (e.key === "Enter") void save(); }}
+            />
+          </div>
+
+          <div>
+            <label className="label">Slot (optional)</label>
+            <select
+              value={slotCode}
+              onChange={(e) => setSlotCode(e.target.value)}
+              className="input"
+            >
+              <option value="">(no slot)</option>
+              {slots.map((s) => (
+                <option key={s.slot_code} value={s.slot_code}>
+                  {s.slot_code}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {msg && (
+            <div className="rounded-lg border border-red-700 bg-red-950 px-4 py-3 text-sm text-red-300">
+              {msg}
+            </div>
+          )}
+
+          <div className="flex gap-3 pt-1">
+            <button
+              onClick={() => void save()}
+              disabled={saving}
+              className="btn-primary flex-1"
+            >
+              {saving ? "Saving…" : "Save"}
+            </button>
+            <Link href={backTo} className="btn-secondary flex-1 text-center">
+              Cancel
+            </Link>
+          </div>
+        </div>
       </div>
     </main>
   );

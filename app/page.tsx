@@ -26,11 +26,11 @@ function minsFromSec(sec: number | null) {
 function targetText(r: TodayRow) {
   if (r.exercise_type === 2) {
     const m = minsFromSec(r.target_duration_sec);
-    return m > 0 ? `${m} min` : "";
+    return m > 0 ? `${m} min` : "—";
   }
   const sets = r.target_sets ?? 3;
   const reps = r.target_reps ?? 10;
-  return `${sets}×${reps}`;
+  return `${sets} × ${reps}`;
 }
 
 export default function HomePage() {
@@ -38,9 +38,9 @@ export default function HomePage() {
 
   const [isAuthed, setIsAuthed] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
-
   const [msg, setMsg] = useState("");
   const [loading, setLoading] = useState(true);
+  const [loadingStuck, setLoadingStuck] = useState(false);
   const [rows, setRows] = useState<TodayRow[]>([]);
 
   const checkIsAdmin = async () => {
@@ -66,7 +66,7 @@ export default function HomePage() {
         return;
       }
 
-      setRows(((data as any[]) ?? []) as TodayRow[]);
+      setRows((data as TodayRow[]) ?? []);
     } finally {
       setLoading(false);
     }
@@ -108,26 +108,27 @@ export default function HomePage() {
   };
 
   useEffect(() => {
+    // Safety valve: if still loading after 6 seconds, surface an escape hatch
+    const stuckTimer = setTimeout(() => setLoadingStuck(true), 6000);
+
     (async () => {
       const { data } = await supabase.auth.getSession();
       const ok = !!data.session;
-
       setIsAuthed(ok);
-
       if (!ok) {
+        clearTimeout(stuckTimer);
         setLoading(false);
-        router.replace("/log"); // <-- key
+        router.replace("/log");
         return;
       }
-
       await checkIsAdmin();
       await loadToday();
+      clearTimeout(stuckTimer);
     })();
 
     const { data: sub } = supabase.auth.onAuthStateChange(async (_evt, session) => {
       const ok = !!session;
       setIsAuthed(ok);
-
       if (!ok) {
         setIsAdmin(false);
         setRows([]);
@@ -135,17 +136,16 @@ export default function HomePage() {
         router.replace("/log");
         return;
       }
-
       await checkIsAdmin();
       await loadToday();
     });
 
-    return () => sub.subscription.unsubscribe();
+    return () => {
+      clearTimeout(stuckTimer);
+      sub.subscription.unsubscribe();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  const th: React.CSSProperties = { textAlign: "left", padding: "10px 8px", borderBottom: "1px solid #333" };
-  const td: React.CSSProperties = { padding: "10px 8px", borderBottom: "1px solid #222", verticalAlign: "top" };
 
   const titleDate = useMemo(() => {
     const d = new Date();
@@ -155,64 +155,122 @@ export default function HomePage() {
     return `${dd}/${mm}/${yyyy}`;
   }, []);
 
+  const dayName = useMemo(() => {
+    return new Date().toLocaleDateString("en-GB", { weekday: "long" });
+  }, []);
+
   return (
-    <main style={{ padding: 20, maxWidth: 1100, margin: "0 auto" }}>
-      <h1 style={{ marginBottom: 8, textAlign: "center" }}>Today ({titleDate})</h1>
+    <main className="min-h-screen bg-gym-bg">
+      <div className="max-w-2xl mx-auto px-4 py-6 space-y-4">
 
-      <div style={{ textAlign: "center", marginBottom: 14 }}>
-        <div style={{ marginTop: 10, display: "flex", gap: 14, justifyContent: "center", flexWrap: "wrap" }}>
-          <Link href="/log">Go to Log Session →</Link>
-          {isAdmin && <Link href="/admin/exercises">Admin: Exercise Maintenance →</Link>}
-        </div>
-      </div>
-
-      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", justifyContent: "flex-end", marginBottom: 14 }}>
-        <button onClick={generateRegenerate} style={{ padding: "10px 14px" }} disabled={!isAuthed}>
-          Generate / Regenerate
-        </button>
-        <button onClick={generateEmptyPlan} style={{ padding: "10px 14px" }} disabled={!isAuthed}>
-          Generate Empty Plan
-        </button>
-        <button onClick={refresh} style={{ padding: "10px 14px" }} disabled={!isAuthed}>
-          Refresh
-        </button>
-        <button onClick={signOut} style={{ padding: "10px 14px" }} disabled={!isAuthed}>
-          Sign out
-        </button>
-      </div>
-
-      {msg && <div style={{ marginBottom: 12, textAlign: "center" }}>{msg}</div>}
-      {loading && <div style={{ marginBottom: 12, textAlign: "center" }}>Loading…</div>}
-
-      <div style={{ overflowX: "auto" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead>
-            <tr>
-              <th style={th}>#</th>
-              <th style={th}>Exercise</th>
-              <th style={th}>Target</th>
-              <th style={th}>Suggested (kg)</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r) => (
-              <tr key={`${r.plan_date}-${r.sequence_no}`}>
-                <td style={td}>{r.sequence_no}</td>
-                <td style={td}>{r.exercise_name}</td>
-                <td style={td}>{targetText(r)}</td>
-                <td style={td}>{r.suggested_load_kg ?? ""}</td>
-              </tr>
-            ))}
-
-            {!loading && rows.length === 0 && (
-              <tr>
-                <td style={td} colSpan={4}>
-                  No plan rows for today.
-                </td>
-              </tr>
+        {/* Header card */}
+        <div className="card flex items-center justify-between gap-4 flex-wrap">
+          <div>
+            <p className="section-title">Today&apos;s Plan</p>
+            <h1 className="text-2xl font-bold text-slate-100 mt-0.5">
+              {dayName}
+              <span className="ml-2 text-slate-400 text-lg font-normal">{titleDate}</span>
+            </h1>
+          </div>
+          <div className="flex gap-2 flex-wrap">
+            <Link href="/log" className="btn-primary">
+              Log Session →
+            </Link>
+            {isAdmin && (
+              <Link href="/admin/exercises" className="btn-secondary">
+                Admin
+              </Link>
             )}
-          </tbody>
-        </table>
+          </div>
+        </div>
+
+        {/* Action buttons */}
+        <div className="flex gap-2 flex-wrap items-center">
+          {isAuthed && (
+            <>
+              <button onClick={generateRegenerate} className="btn-secondary" disabled={!isAuthed}>
+                Generate / Regenerate
+              </button>
+              <button onClick={generateEmptyPlan} className="btn-secondary" disabled={!isAuthed}>
+                Empty Plan
+              </button>
+              <button onClick={refresh} className="btn-ghost" disabled={!isAuthed}>
+                Refresh
+              </button>
+            </>
+          )}
+          {/* Sign out always visible so user is never trapped */}
+          <button onClick={signOut} className="btn-ghost ml-auto">
+            Sign out
+          </button>
+        </div>
+
+        {/* Status message */}
+        {msg && (
+          <div className="rounded-lg border border-blue-700 bg-blue-950 px-4 py-3 text-sm text-blue-200">
+            {msg}
+          </div>
+        )}
+
+        {/* Loading */}
+        {loading && !loadingStuck && (
+          <div className="card flex items-center gap-3 text-slate-400">
+            <svg className="animate-spin h-4 w-4 text-blue-500 shrink-0" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+            </svg>
+            Loading plan…
+          </div>
+        )}
+
+        {/* Escape hatch if loading hangs */}
+        {loading && loadingStuck && (
+          <div className="card space-y-3 text-center">
+            <p className="text-slate-300">Taking longer than expected…</p>
+            <p className="text-sm text-slate-500">Your session may have expired.</p>
+            <button onClick={signOut} className="btn-primary">
+              Sign out and start fresh
+            </button>
+          </div>
+        )}
+
+        {/* Exercise list */}
+        {!loading && (
+          <div className="space-y-2">
+            {rows.length === 0 ? (
+              <div className="card text-center text-slate-400 py-10">
+                <p className="text-lg mb-2">No plan for today</p>
+                <p className="text-sm">Use Generate above, or log an ad-hoc workout.</p>
+              </div>
+            ) : (
+              rows.map((r) => (
+                <div
+                  key={`${r.plan_date}-${r.sequence_no}`}
+                  className="card flex items-center gap-4"
+                >
+                  <span className="w-7 text-center text-slate-500 text-sm font-mono shrink-0">
+                    {r.sequence_no}
+                  </span>
+                  <div className="flex-1 min-w-0">
+                    <p className="font-medium text-slate-100 truncate">{r.exercise_name}</p>
+                    <div className="flex items-center gap-2 mt-1">
+                      <span className={r.exercise_type === 2 ? "badge-green" : "badge-blue"}>
+                        {r.exercise_type === 2 ? "Cardio" : "Strength"}
+                      </span>
+                      <span className="text-sm text-slate-400">{targetText(r)}</span>
+                    </div>
+                  </div>
+                  {r.suggested_load_kg != null && (
+                    <div className="text-right shrink-0">
+                      <p className="text-sm font-semibold text-slate-200">{r.suggested_load_kg} kg</p>
+                      <p className="text-xs text-slate-500">suggested</p>
+                    </div>
+                  )}
+                </div>
+              ))
+            )}
+          </div>
+        )}
       </div>
     </main>
   );

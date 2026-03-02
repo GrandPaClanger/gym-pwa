@@ -108,9 +108,9 @@ export default function LogPage() {
   // Session notes (stored in Supabase per session_start)
   const [sessionNotes, setSessionNotes] = useState("");
   const [notesMsg, setNotesMsg] = useState("");
-  const notesSaveTimer = useRef<any>(null);
+  const notesSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const autosaveTimers = useRef<Record<string, any>>({});
+  const autosaveTimers = useRef<Record<string, ReturnType<typeof setTimeout> | null>>({});
 
   const [sets, setSets] = useState<Record<string, number | "">>({});
   const [reps, setReps] = useState<Record<string, number | "">>({});
@@ -124,9 +124,9 @@ export default function LogPage() {
 
   const [swapPick, setSwapPick] = useState<Record<string, number | "">>({});
 
-  // NEW: per-exercise quick notes (one per exercise_id, shown every time)
+  // per-exercise quick notes (one per exercise_id, shown every time)
   const [exerciseNotes, setExerciseNotes] = useState<Record<number, string>>({});
-  const noteTimers = useRef<Record<number, any>>({});
+  const noteTimers = useRef<Record<number, ReturnType<typeof setTimeout> | null>>({});
   const [exNoteMsg, setExNoteMsg] = useState("");
 
   const signInMagicLink = async () => {
@@ -167,7 +167,7 @@ export default function LogPage() {
     setMsg("New session started.");
   };
 
-  const loadExerciseList = async () => {
+  const loadExerciseList = async (): Promise<Exercise[]> => {
     const { data, error } = await supabase
       .from("exercise")
       .select("exercise_id, canonical_name, exercise_type, is_manual_only, is_distance_based, is_active")
@@ -177,10 +177,10 @@ export default function LogPage() {
     if (error) {
       setMsg(error.message);
       setExerciseList([]);
-      return;
+      return [];
     }
 
-    const list = ((data as any[]) ?? []).map<Exercise>((r) => ({
+    const list = ((data as Exercise[]) ?? []).map<Exercise>((r) => ({
       exercise_id: Number(r.exercise_id),
       canonical_name: String(r.canonical_name),
       exercise_type: Number(r.exercise_type),
@@ -189,6 +189,7 @@ export default function LogPage() {
       is_active: !!r.is_active,
     }));
     setExerciseList(list);
+    return list;
   };
 
   const exerciseById = useMemo(() => {
@@ -233,7 +234,7 @@ export default function LogPage() {
 
     if (error) return null;
 
-    const id = (data as any[])?.[0]?.plan_id;
+    const id = (data as { plan_id: number }[])?.[0]?.plan_id;
     const n = Number(id);
     if (!Number.isFinite(n)) return null;
     setPlanId(n);
@@ -283,7 +284,7 @@ export default function LogPage() {
     });
   };
 
-  const loadTodayPlanRows = async () => {
+  const loadTodayPlanRows = async (freshList?: Exercise[]) => {
     setMsg("");
     const planDate = todayIso();
 
@@ -298,8 +299,14 @@ export default function LogPage() {
       return;
     }
 
+    // If a freshList is passed (on initial load), build the name map from it directly
+    // so we don't rely on the stale exerciseByName memo before React re-renders.
+    const nameMap = freshList
+      ? new Map(freshList.map((e) => [normName(e.canonical_name), e]))
+      : exerciseByName;
+
     const src = ((data as PlanRowFromView[]) ?? []).map<Row>((r) => {
-      const recoveredId = r.exercise_id ?? exerciseByName.get(normName(r.exercise_name))?.exercise_id ?? null;
+      const recoveredId = r.exercise_id ?? nameMap.get(normName(r.exercise_name))?.exercise_id ?? null;
       return {
         source: "plan",
         plan_date: planDate,
@@ -377,7 +384,7 @@ export default function LogPage() {
     const planDate = todayIso();
     const k = rowKey(planDate, sequence_no);
 
-    if (autosaveTimers.current[k]) clearTimeout(autosaveTimers.current[k]);
+    if (autosaveTimers.current[k]) clearTimeout(autosaveTimers.current[k]!);
 
     autosaveTimers.current[k] = setTimeout(async () => {
       autosaveTimers.current[k] = null;
@@ -442,7 +449,15 @@ export default function LogPage() {
     const pid = await requirePlanId();
     if (!pid) return setMsg("No plan loaded. Click Refresh plan.");
 
-    const insertRow: any = {
+    const insertRow: {
+      plan_id: number;
+      sequence_no: number;
+      exercise_id: number;
+      target_sets: number;
+      target_reps: number;
+      target_load_kg: null;
+      target_duration_sec: number | null;
+    } = {
       plan_id: pid,
       sequence_no: newSeq,
       exercise_id: ex.exercise_id,
@@ -478,6 +493,7 @@ export default function LogPage() {
     const { error } = await supabase.from("workout_plan_item").delete().eq("plan_id", pid).eq("sequence_no", sequence_no);
     if (error) return setMsg(error.message);
 
+    clearLocalEditsForKey(k);
     await loadTodayPlanRows();
     setMsg("Removed.");
   };
@@ -553,7 +569,7 @@ export default function LogPage() {
       return;
     }
 
-    setSessionNotes((data as any)?.notes ?? "");
+    setSessionNotes((data as { notes: string } | null)?.notes ?? "");
   };
 
   const saveNotesToDb = async (ss: string, notes: string) => {
@@ -566,7 +582,7 @@ export default function LogPage() {
     else setNotesMsg("Saved.");
   };
 
-  // NEW: load per-exercise notes for this user/person
+  // load per-exercise notes for this user/person
   const loadExerciseNotes = async () => {
     setExNoteMsg("");
     const { data, error } = await supabase.rpc("my_exercise_notes");
@@ -576,7 +592,7 @@ export default function LogPage() {
     }
 
     const m: Record<number, string> = {};
-    for (const r of (data as any[]) ?? []) {
+    for (const r of (data as { exercise_id: number; note: string }[]) ?? []) {
       const id = Number(r.exercise_id);
       if (!Number.isFinite(id)) continue;
       m[id] = String(r.note ?? "");
@@ -586,7 +602,7 @@ export default function LogPage() {
 
   const queueSaveExerciseNote = (exercise_id: number, note: string) => {
     setExNoteMsg("");
-    if (noteTimers.current[exercise_id]) clearTimeout(noteTimers.current[exercise_id]);
+    if (noteTimers.current[exercise_id]) clearTimeout(noteTimers.current[exercise_id]!);
 
     noteTimers.current[exercise_id] = setTimeout(async () => {
       noteTimers.current[exercise_id] = null;
@@ -732,11 +748,11 @@ export default function LogPage() {
   useEffect(() => {
     if (!isAuthed) return;
     (async () => {
-      await loadExerciseList();
-      await loadTodayPlanRows();
+      const freshList = await loadExerciseList();
+      await loadTodayPlanRows(freshList);
       const ss = ensureSessionStart();
       await loadNotesFromDb(ss);
-      await loadExerciseNotes(); // NEW
+      await loadExerciseNotes();
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAuthed]);
@@ -754,314 +770,335 @@ export default function LogPage() {
     return exerciseList.filter((e) => e.canonical_name.toLowerCase().includes(q));
   }, [exerciseList, addExerciseQuery]);
 
-  const th: React.CSSProperties = { textAlign: "left", padding: "10px 8px", borderBottom: "1px solid #333" };
-  const td: React.CSSProperties = { padding: "10px 8px", borderBottom: "1px solid #222", verticalAlign: "top" };
-
+  // ── Loading / auth-check state ────────────────────────────────────────────
   if (!authReady) {
     return (
-      <main style={{ padding: 20, maxWidth: 900, margin: "0 auto" }}>
-        <h1>Log session</h1>
-        <p>Checking sign-in…</p>
+      <main className="min-h-screen bg-gym-bg flex items-center justify-center">
+        <div className="card text-center space-y-3">
+          <svg className="animate-spin h-6 w-6 text-blue-500 mx-auto" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+          </svg>
+          <p className="text-slate-400">Checking sign-in…</p>
+        </div>
       </main>
     );
   }
 
+  // ── Sign-in screen ────────────────────────────────────────────────────────
   if (!isAuthed) {
     return (
-      <main style={{ padding: 20, maxWidth: 900, margin: "0 auto" }}>
-        <h1>Log session</h1>
-        <p>Sign in to continue.</p>
+      <main className="min-h-screen bg-gym-bg flex items-center justify-center p-4">
+        <div className="card max-w-sm w-full space-y-5">
+          <div>
+            <p className="section-title">Gym Tracker</p>
+            <h1 className="text-2xl font-bold text-slate-100 mt-0.5">Sign in</h1>
+          </div>
 
-        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-          <input
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            placeholder="you@example.com"
-            style={{ padding: 10, minWidth: 280 }}
-          />
-          <button onClick={signInMagicLink} style={{ padding: "10px 14px" }}>
-            Send magic link
-          </button>
+          <div className="space-y-3">
+            <div>
+              <label className="label">Email address</label>
+              <input
+                type="email"
+                className="input"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="you@example.com"
+                onKeyDown={(e) => { if (e.key === "Enter") void signInMagicLink(); }}
+              />
+            </div>
+            <button onClick={() => void signInMagicLink()} className="btn-primary w-full">
+              Send magic link
+            </button>
+          </div>
+
+          {msg && (
+            <p className="text-sm text-center text-slate-300 border border-slate-600 rounded-lg px-3 py-2">
+              {msg}
+            </p>
+          )}
         </div>
-
-        {msg && <p style={{ marginTop: 12 }}>{msg}</p>}
       </main>
     );
   }
 
+  // ── Main logged-in view ───────────────────────────────────────────────────
   return (
-    <main style={{ padding: 20, maxWidth: 1100, margin: "0 auto" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-        <h1 style={{ marginBottom: 8 }}>Log session</h1>
-        <Link href="/" style={{ padding: "10px 14px", border: "1px solid #333", borderRadius: 6 }}>
-          ← Back to Today’s Plan
-        </Link>
-      </div>
+    <main className="min-h-screen bg-gym-bg pb-24">
+      <div className="max-w-2xl mx-auto px-4 py-6 space-y-4">
 
-      <div style={{ color: "#666", marginBottom: 12 }}>
-        Date: <b>{todayIso()}</b> · Mode: <b>{mode === "plan" ? "Plan" : "Ad-hoc"}</b> · Plan ID:{" "}
-        <b>{planId ?? "—"}</b>
-      </div>
+        {/* Header */}
+        <div className="card flex items-center justify-between gap-4 flex-wrap">
+          <div>
+            <p className="section-title">Log Session</p>
+            <h1 className="text-xl font-bold text-slate-100 mt-0.5 flex items-center gap-2">
+              {todayIso()}
+              <span className={`badge ${mode === "plan" ? "badge-blue" : "badge-slate"}`}>
+                {mode === "plan" ? "Plan" : "Ad-hoc"}
+              </span>
+              {planId && <span className="text-xs text-slate-500 font-normal">#{planId}</span>}
+            </h1>
+          </div>
+          <Link href="/" className="btn-ghost">
+            ← Today&apos;s Plan
+          </Link>
+        </div>
 
-      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginBottom: 14 }}>
-        <button onClick={refreshPlan} style={{ padding: "10px 14px" }}>
-          Refresh plan
-        </button>
-        <button onClick={startAdhocWorkout} style={{ padding: "10px 14px" }}>
-          Ad-hoc workout
-        </button>
-
-        <button onClick={newSession} style={{ padding: "10px 14px" }}>
-          New session
-        </button>
-
-        <label style={{ marginLeft: 10 }}>
-          Duration (min):
-          <input
-            type="text"
-            inputMode="numeric"
-            value={String(sessionDurationMin)}
-            onChange={(e) => setSessionDurationMin(Number(parseNumberOrBlank(e.target.value) || 0))}
-            style={{ width: 90, marginLeft: 6, padding: 6 }}
-          />
-        </label>
-
-        <button onClick={saveSession} style={{ padding: "10px 14px" }}>
-          Save session
-        </button>
-
-        {msg && <span style={{ marginLeft: 8 }}>{msg}</span>}
-      </div>
-
-      <div style={{ padding: 12, border: "1px solid #222", borderRadius: 8, marginBottom: 14 }}>
-        <b>Add exercise</b>
-        <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-          <input
-            value={addExerciseQuery}
-            onChange={(e) => setAddExerciseQuery(e.target.value)}
-            placeholder="Search…"
-            style={{ padding: 10, minWidth: 280 }}
-          />
-
-          <select
-            value={addExerciseId === "" ? "" : String(addExerciseId)}
-            onChange={(e) => setAddExerciseId(e.target.value ? Number(e.target.value) : "")}
-            style={{ padding: 10, minWidth: 320 }}
-          >
-            <option value="">Select…</option>
-            {filteredAddExercises.map((e) => (
-              <option key={e.exercise_id} value={e.exercise_id}>
-                {e.canonical_name}
-                {e.is_manual_only ? " (manual)" : ""}
-                {e.is_distance_based ? " (distance)" : ""}
-              </option>
-            ))}
-          </select>
-
-          <button onClick={addExercise} style={{ padding: "10px 14px" }}>
-            Add
+        {/* Toolbar */}
+        <div className="flex gap-2 flex-wrap items-center">
+          <button onClick={() => void refreshPlan()} className="btn-secondary">
+            Refresh plan
           </button>
+          <button onClick={startAdhocWorkout} className="btn-secondary">
+            Ad-hoc
+          </button>
+          <button onClick={newSession} className="btn-ghost">
+            New session
+          </button>
+
+          <div className="flex items-center gap-2 ml-auto">
+            <label className="label mb-0 whitespace-nowrap">Duration&nbsp;(min)</label>
+            <input
+              type="text"
+              inputMode="numeric"
+              value={String(sessionDurationMin)}
+              onChange={(e) => setSessionDurationMin(Number(parseNumberOrBlank(e.target.value) || 0))}
+              className="input-sm w-16 text-center"
+            />
+          </div>
         </div>
-      </div>
 
-      <div style={{ overflowX: "auto" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead>
-            <tr>
-              <th style={th}>Seq</th>
-              <th style={th}>Exercise</th>
-              <th style={th}>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r) => {
-              const k = rowKey(todayIso(), r.sequence_no);
+        {/* Status */}
+        {msg && (
+          <div className="rounded-lg border border-blue-700 bg-blue-950 px-4 py-3 text-sm text-blue-200">
+            {msg}
+          </div>
+        )}
 
-              const showSets = (sets[k] ?? (r.target_sets ?? 3)) as number | "";
-              const showReps = (reps[k] ?? (r.target_reps ?? 10)) as number | "";
+        {/* Add exercise */}
+        <div className="card space-y-3">
+          <p className="section-title">Add exercise</p>
+          <div className="flex flex-col sm:flex-row gap-2">
+            <input
+              value={addExerciseQuery}
+              onChange={(e) => setAddExerciseQuery(e.target.value)}
+              placeholder="Search…"
+              className="input sm:w-40 shrink-0"
+            />
+            <select
+              value={addExerciseId === "" ? "" : String(addExerciseId)}
+              onChange={(e) => setAddExerciseId(e.target.value ? Number(e.target.value) : "")}
+              className="input flex-1"
+            >
+              <option value="">Select exercise…</option>
+              {filteredAddExercises.map((e) => (
+                <option key={e.exercise_id} value={e.exercise_id}>
+                  {e.canonical_name}
+                  {e.is_manual_only ? " (manual)" : ""}
+                  {e.is_distance_based ? " (distance)" : ""}
+                </option>
+              ))}
+            </select>
+            <button onClick={() => void addExercise()} className="btn-primary shrink-0">
+              Add
+            </button>
+          </div>
+        </div>
 
-              const defaultLoad = getRowDefaultLoad(r);
-              const showLoad = loads[k] ?? (defaultLoad == null ? "" : String(defaultLoad));
+        {/* Exercise cards */}
+        <div className="space-y-3">
+          {rows.length === 0 && (
+            <div className="card text-center text-slate-400 py-8">
+              <p>No exercises. Load a plan or add exercises above.</p>
+            </div>
+          )}
 
-              const targetMin = r.target_duration_sec != null ? Math.round(r.target_duration_sec / 60) : 0;
-              const showMin = (durationsMin[k] ?? targetMin) as number | "";
+          {rows.map((r) => {
+            const k = rowKey(todayIso(), r.sequence_no);
 
-              const showCalories = (caloriesKcal[k] ?? "") as number | "";
-              const showCaloriesField = isDistanceBasedRow(r);
+            const showSets = (sets[k] ?? (r.target_sets ?? 3)) as number | "";
+            const showReps = (reps[k] ?? (r.target_reps ?? 10)) as number | "";
 
-              const exId = r.exercise_id ?? null;
-              const exNoteVal = exId ? (exerciseNotes[exId] ?? "") : "";
+            const defaultLoad = getRowDefaultLoad(r);
+            const showLoad = loads[k] ?? (defaultLoad == null ? "" : String(defaultLoad));
 
-              return (
-                <tr key={k}>
-                  <td style={td}>{r.sequence_no}</td>
+            const targetMin = r.target_duration_sec != null ? Math.round(r.target_duration_sec / 60) : 0;
+            const showMin = (durationsMin[k] ?? targetMin) as number | "";
 
-                  <td style={td}>
-                    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                      <div>
-                        <b>{r.exercise_name}</b>
-                      </div>
+            const showCalories = (caloriesKcal[k] ?? "") as number | "";
+            const showCaloriesField = isDistanceBasedRow(r);
 
-                      {/* NEW: quick exercise note (saved once per exercise_id, shows every time) */}
-                      {exId != null && (
-                        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-                          <label style={{ color: "#888" }}>
-                            Note:
-                            <input
-                              type="text"
-                              value={exNoteVal}
-                              maxLength={30}
-                              onChange={(e) => {
-                                const v = e.target.value.slice(0, 30);
-                                setExerciseNotes((prev) => ({ ...prev, [exId]: v }));
-                                queueSaveExerciseNote(exId, v);
-                              }}
-                              placeholder='e.g. "2 sets @10, 1 @9"'
-                              style={{ width: 260, marginLeft: 6, padding: 6 }}
-                            />
-                          </label>
-                        </div>
-                      )}
+            const exId = r.exercise_id ?? null;
+            const exNoteVal = exId ? (exerciseNotes[exId] ?? "") : "";
 
-                      {r.exercise_type === 1 && (
-                        <div style={{ marginTop: 2, display: "flex", gap: 10, flexWrap: "wrap" }}>
-                          <label>
-                            Reps:
-                            <input
-                              type="text"
-                              inputMode="numeric"
-                              value={showReps === "" ? "" : String(showReps)}
-                              onChange={(e) => {
-                                const raw = parseNumberOrBlank(e.target.value);
-                                setReps((prev) => ({ ...prev, [k]: raw }));
-                                if (raw !== "" && mode === "plan") queueAutosave(r.sequence_no, { target_reps: clampReps(raw) });
-                              }}
-                              style={{ width: 90, marginLeft: 6, padding: 6 }}
-                            />
-                          </label>
-
-                          <label>
-                            Load (kg):
-                            <input
-                              type="text"
-                              inputMode="decimal"
-                              value={showLoad}
-                              onChange={(e) => {
-                                const raw = e.target.value;
-                                setLoads((prev) => ({ ...prev, [k]: raw }));
-                                if (mode === "plan") queueAutosave(r.sequence_no, { target_load_kg: parseDecimalOrNull(raw) });
-                              }}
-                              style={{ width: 110, marginLeft: 6, padding: 6 }}
-                            />
-                          </label>
-
-                          <label>
-                            Sets:
-                            <input
-                              type="text"
-                              inputMode="numeric"
-                              value={showSets === "" ? "" : String(showSets)}
-                              onChange={(e) => {
-                                const v = parseNumberOrBlank(e.target.value);
-                                setSets((prev) => ({ ...prev, [k]: v }));
-                                if (v !== "" && mode === "plan") queueAutosave(r.sequence_no, { target_sets: Math.max(1, Math.round(v)) });
-                              }}
-                              style={{ width: 70, marginLeft: 6, padding: 6 }}
-                            />
-                          </label>
-                        </div>
-                      )}
-
-                      {r.exercise_type === 2 && (
-                        <div style={{ marginTop: 2, display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
-                          <div>
-                            Target: <b>{targetMin} min</b>
-                          </div>
-
-                          <label>
-                            Duration (min):
-                            <input
-                              type="text"
-                              inputMode="numeric"
-                              value={showMin === "" ? "" : String(showMin)}
-                              onChange={(e) => {
-                                const v = parseNumberOrBlank(e.target.value);
-                                setDurationsMin((prev) => ({ ...prev, [k]: v }));
-                                if (v !== "" && mode === "plan") queueAutosave(r.sequence_no, { target_duration_sec: Math.max(0, Math.round(v * 60)) });
-                                if (v === "" && mode === "plan") queueAutosave(r.sequence_no, { target_duration_sec: 0 });
-                              }}
-                              style={{ width: 90, marginLeft: 6, padding: 6 }}
-                            />
-                          </label>
-
-                          {showCaloriesField && (
-                            <label>
-                              Calories (kcal):
-                              <input
-                                type="text"
-                                inputMode="numeric"
-                                value={showCalories === "" ? "" : String(showCalories)}
-                                onChange={(e) => {
-                                  const v = parseNumberOrBlank(e.target.value);
-                                  setCaloriesKcal((prev) => ({ ...prev, [k]: v }));
-                                }}
-                                style={{ width: 120, marginLeft: 6, padding: 6 }}
-                              />
-                            </label>
-                          )}
-                        </div>
-                      )}
+            return (
+              <div key={k} className="card space-y-3">
+                {/* Card header */}
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-xs text-slate-500 font-mono">{r.sequence_no}</span>
+                      <h3 className="font-semibold text-slate-100 truncate">{r.exercise_name}</h3>
+                      <span className={r.exercise_type === 2 ? "badge-green" : "badge-blue"}>
+                        {r.exercise_type === 2 ? "Cardio" : "Strength"}
+                      </span>
                     </div>
-                  </td>
+                  </div>
+                  <button
+                    onClick={() => void removeRow(r.sequence_no)}
+                    className="btn-danger shrink-0 text-xs px-2 py-1"
+                  >
+                    Remove
+                  </button>
+                </div>
 
-                  <td style={td}>
-                    <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-                      <select
-                        value={swapPick[k] ?? ""}
+                {/* Quick exercise note */}
+                {exId != null && (
+                  <div>
+                    <label className="label">Quick note</label>
+                    <input
+                      type="text"
+                      value={exNoteVal}
+                      maxLength={30}
+                      onChange={(e) => {
+                        const v = e.target.value.slice(0, 30);
+                        setExerciseNotes((prev) => ({ ...prev, [exId]: v }));
+                        queueSaveExerciseNote(exId, v);
+                      }}
+                      placeholder='e.g. "2 sets @10, 1 @9"'
+                      className="input"
+                    />
+                  </div>
+                )}
+
+                {/* Strength inputs */}
+                {r.exercise_type === 1 && (
+                  <div className="grid grid-cols-3 gap-3">
+                    <div>
+                      <label className="label">Reps</label>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        value={showReps === "" ? "" : String(showReps)}
                         onChange={(e) => {
-                          const v = e.target.value;
-                          if (!v) return;
-                          const id = Number(v);
-                          setSwapPick((p) => ({ ...p, [k]: id }));
-                          void replaceExercise(r.sequence_no, id);
-                          setSwapPick((p) => ({ ...p, [k]: "" }));
+                          const raw = parseNumberOrBlank(e.target.value);
+                          setReps((prev) => ({ ...prev, [k]: raw }));
+                          if (raw !== "" && mode === "plan") queueAutosave(r.sequence_no, { target_reps: clampReps(raw) });
                         }}
-                        style={{ padding: 10, minWidth: 220 }}
-                      >
-                        <option value="">Swap…</option>
-                        {exerciseList.map((e) => (
-                          <option key={e.exercise_id} value={e.exercise_id}>
-                            {e.canonical_name}
-                            {e.is_manual_only ? " (manual)" : ""}
-                            {e.is_distance_based ? " (distance)" : ""}
-                          </option>
-                        ))}
-                      </select>
-
-                      <button onClick={() => void removeRow(r.sequence_no)} style={{ padding: "10px 14px" }}>
-                        Remove
-                      </button>
+                        className="input-sm w-full text-center"
+                      />
                     </div>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
+                    <div>
+                      <label className="label">Load (kg)</label>
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        value={showLoad}
+                        onChange={(e) => {
+                          const raw = e.target.value;
+                          setLoads((prev) => ({ ...prev, [k]: raw }));
+                          if (mode === "plan") queueAutosave(r.sequence_no, { target_load_kg: parseDecimalOrNull(raw) });
+                        }}
+                        className="input-sm w-full text-center"
+                      />
+                    </div>
+                    <div>
+                      <label className="label">Sets</label>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        value={showSets === "" ? "" : String(showSets)}
+                        onChange={(e) => {
+                          const v = parseNumberOrBlank(e.target.value);
+                          setSets((prev) => ({ ...prev, [k]: v }));
+                          if (v !== "" && mode === "plan") queueAutosave(r.sequence_no, { target_sets: Math.max(1, Math.round(v)) });
+                        }}
+                        className="input-sm w-full text-center"
+                      />
+                    </div>
+                  </div>
+                )}
 
-      {/* tiny status line for note saves */}
-      {(exNoteMsg || notesMsg) && (
-        <div style={{ marginTop: 10, color: "#777" }}>
-          {exNoteMsg ? <span>{exNoteMsg}</span> : null}
-          {exNoteMsg && notesMsg ? <span> · </span> : null}
-          {notesMsg ? <span>{notesMsg}</span> : null}
+                {/* Cardio inputs */}
+                {r.exercise_type === 2 && (
+                  <div className="flex gap-3 flex-wrap items-end">
+                    <div>
+                      <label className="label">Target</label>
+                      <p className="text-slate-300 text-sm font-medium">{targetMin} min</p>
+                    </div>
+                    <div>
+                      <label className="label">Duration (min)</label>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        value={showMin === "" ? "" : String(showMin)}
+                        onChange={(e) => {
+                          const v = parseNumberOrBlank(e.target.value);
+                          setDurationsMin((prev) => ({ ...prev, [k]: v }));
+                          if (v !== "" && mode === "plan") queueAutosave(r.sequence_no, { target_duration_sec: Math.max(0, Math.round(v * 60)) });
+                          if (v === "" && mode === "plan") queueAutosave(r.sequence_no, { target_duration_sec: 0 });
+                        }}
+                        className="input-sm w-20 text-center"
+                      />
+                    </div>
+                    {showCaloriesField && (
+                      <div>
+                        <label className="label">Calories (kcal)</label>
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          value={showCalories === "" ? "" : String(showCalories)}
+                          onChange={(e) => {
+                            const v = parseNumberOrBlank(e.target.value);
+                            setCaloriesKcal((prev) => ({ ...prev, [k]: v }));
+                          }}
+                          className="input-sm w-24 text-center"
+                        />
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Swap exercise */}
+                <div>
+                  <label className="label">Swap exercise</label>
+                  <select
+                    value={swapPick[k] ?? ""}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      if (!v) return;
+                      const id = Number(v);
+                      setSwapPick((p) => ({ ...p, [k]: id }));
+                      void replaceExercise(r.sequence_no, id);
+                      setSwapPick((p) => ({ ...p, [k]: "" }));
+                    }}
+                    className="input"
+                  >
+                    <option value="">Swap…</option>
+                    {exerciseList.map((e) => (
+                      <option key={e.exercise_id} value={e.exercise_id}>
+                        {e.canonical_name}
+                        {e.is_manual_only ? " (manual)" : ""}
+                        {e.is_distance_based ? " (distance)" : ""}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+            );
+          })}
         </div>
-      )}
 
-      <div style={{ marginTop: 18, padding: 12, border: "1px solid #222", borderRadius: 8 }}>
-        <b>Session notes</b>
-        <div style={{ marginTop: 8 }}>
+        {/* Auto-save status */}
+        {(exNoteMsg || notesMsg) && (
+          <p className="text-xs text-slate-500 text-center">
+            {[exNoteMsg, notesMsg].filter(Boolean).join(" · ")}
+          </p>
+        )}
+
+        {/* Session notes */}
+        <div className="card space-y-2">
+          <p className="section-title">Session notes</p>
           <textarea
             value={sessionNotes}
             onChange={(e) => {
@@ -1075,8 +1112,17 @@ export default function LogPage() {
               }, 600);
             }}
             placeholder="Notes for this session…"
-            style={{ width: "100%", minHeight: 90, padding: 10 }}
+            className="input min-h-[80px] resize-y"
           />
+        </div>
+      </div>
+
+      {/* Sticky save footer */}
+      <div className="fixed bottom-0 left-0 right-0 border-t border-slate-700 bg-slate-900/95 backdrop-blur-sm px-4 py-3">
+        <div className="max-w-2xl mx-auto">
+          <button onClick={() => void saveSession()} className="btn-primary w-full text-base py-3">
+            Save Session
+          </button>
         </div>
       </div>
     </main>
