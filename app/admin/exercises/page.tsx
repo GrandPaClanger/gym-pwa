@@ -396,7 +396,7 @@ export default function AdminExercisesPage() {
             </div>
 
             {/* Two-column layout: list + detail */}
-            <div className="grid grid-cols-1 lg:grid-cols-[360px_1fr] gap-4">
+            <div className="grid grid-cols-1 lg:grid-cols-[360px_1fr] gap-4 lg:items-start">
 
               {/* Exercise list */}
               <div className="card space-y-3">
@@ -407,7 +407,7 @@ export default function AdminExercisesPage() {
                   placeholder="Search…"
                   className="input"
                 />
-                <div className="space-y-0.5 max-h-[520px] overflow-y-auto -mx-4 px-4">
+                <div className="space-y-0.5 max-h-[40vh] lg:max-h-[520px] overflow-y-auto -mx-4 px-4">
                   {filtered.map((e) => (
                     <button
                       key={e.exercise_id}
