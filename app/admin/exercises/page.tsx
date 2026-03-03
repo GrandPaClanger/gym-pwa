@@ -139,13 +139,32 @@ export default function AdminExercisesPage() {
   }, [isAuthed]);
 
   useEffect(() => {
-    if (!selected) return;
-    setEditName(selected.canonical_name);
-    setEditType(selected.exercise_type);
-    setEditManual(selected.is_manual_only);
-    setEditDistance(selected.is_distance_based);
-    setEditActive(selected.is_active);
-  }, [selected]);
+  if (!selected) return;
+  setEditName(selected.canonical_name);
+  setEditType(selected.exercise_type);
+  setEditManual(selected.is_manual_only);
+  setEditDistance(selected.is_distance_based);
+  setEditActive(selected.is_active);
+
+  // Fetch current slot mapping and pre-populate the dropdown
+  (async () => {
+    const { data, error } = await supabase
+      .from("exercise_slot")
+      .select("slot_code, base_weight")
+      .eq("exercise_id", selected.exercise_id)
+      .limit(1)
+      .maybeSingle();
+
+    if (!error && data) {
+      setMapSlot(data.slot_code);
+      setMapBaseWeight(Number(data.base_weight) ?? 1);
+    } else {
+      // No slot mapped yet
+      setMapSlot("");
+      setMapBaseWeight(1);
+    }
+  })();
+}, [selected]);
 
   const createExercise = async () => {
     setMsg("");
