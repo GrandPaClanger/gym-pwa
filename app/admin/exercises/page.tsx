@@ -139,8 +139,11 @@ export default function AdminExercisesPage() {
       return;
     }
 
-    // list exercises (admin rpc)
-    const exRes = await supabase.rpc("admin_list_exercises");
+    // list exercises
+    const exRes = await supabase
+      .from("exercise")
+      .select("exercise_id, canonical_name, exercise_type, is_manual_only, is_distance_based, is_active")
+      .order("canonical_name", { ascending: true });
     if (exRes.error) {
       setLoading(false);
       setMsg(exRes.error.message);
@@ -163,8 +166,11 @@ export default function AdminExercisesPage() {
     }));
     setItems(list);
 
-    // slot codes (admin rpc)
-    const slotRes = await supabase.rpc("admin_list_slot_codes");
+    // slot codes
+    const slotRes = await supabase
+      .from("exercise_slot")
+      .select("slot_code")
+      .order("slot_code", { ascending: true });
     const codes = slotRes.error ? [] : (slotRes.data ?? []).map((r: { slot_code: string }) => String(r.slot_code));
     setSlotCodes(codes);
 
