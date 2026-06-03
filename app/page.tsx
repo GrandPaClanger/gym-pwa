@@ -9,12 +9,14 @@ import { ExerciseGroup, readExerciseGroups } from "@/lib/exerciseGroups";
 type TodayRow = {
   plan_date: string;
   sequence_no: number;
+  exercise_id: number | null;
   exercise_name: string;
   exercise_type: number; // 1 strength, 2 cardio, 4 classes
   target_sets: number | null;
   target_reps: number | null;
   target_duration_sec: number | null;
   suggested_load_kg: number | null;
+  is_active: boolean;
 };
 
 type Exercise = {
@@ -113,9 +115,10 @@ export default function HomePage() {
       const { data, error } = await supabase
         .from("v_plan_today_edit")
         .select(
-          "plan_date, sequence_no, exercise_name, exercise_type, target_sets, target_reps, target_duration_sec, suggested_load_kg"
+          "plan_date, sequence_no, exercise_id, exercise_name, exercise_type, target_sets, target_reps, target_duration_sec, suggested_load_kg, is_active"
         )
         .eq("plan_date", todayIso())
+        .eq("is_active", true)
         .order("sequence_no", { ascending: true });
 
       if (error) {

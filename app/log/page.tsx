@@ -18,6 +18,7 @@ type PlanRowFromView = {
   target_duration_sec: number | null;
   suggested_load_kg: number | null;
   target_load_kg: number | null;
+  is_active: boolean;
 };
 
 type Exercise = {
@@ -334,6 +335,7 @@ export default function LogPage() {
       .from("v_plan_today_edit")
       .select("*")
       .eq("plan_date", planDate)
+      .eq("is_active", true)
       .order("sequence_no", { ascending: true });
 
     if (error) {
