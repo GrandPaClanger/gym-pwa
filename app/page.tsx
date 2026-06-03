@@ -30,8 +30,8 @@ type PlanInsertRow = {
   plan_id: number;
   sequence_no: number;
   exercise_id: number;
-  target_sets: number | null;
-  target_reps: number | null;
+  target_sets: number;
+  target_reps: number;
   target_load_kg: null;
   target_duration_sec: number | null;
 };
@@ -60,6 +60,8 @@ const typeLabel = (exerciseType: number) =>
 const typeBadgeClass = (exerciseType: number) =>
   isClassType(exerciseType) ? "badge-purple" : isCardioType(exerciseType) ? "badge-green" : "badge-blue";
 const norm = (value: string) => value.trim().toLowerCase();
+const targetSetsFor = (exerciseType: number) => (isStrengthType(exerciseType) ? 3 : 1);
+const targetRepsFor = (exerciseType: number) => (isStrengthType(exerciseType) ? 10 : 1);
 
 function targetText(r: TodayRow) {
   if (isTimedType(r.exercise_type)) {
@@ -260,8 +262,8 @@ export default function HomePage() {
       plan_id: planId,
       sequence_no: (index + 1) * 10,
       exercise_id: exercise.exercise_id,
-      target_sets: isStrengthType(exercise.exercise_type) ? 3 : null,
-      target_reps: isStrengthType(exercise.exercise_type) ? 10 : null,
+      target_sets: targetSetsFor(exercise.exercise_type),
+      target_reps: targetRepsFor(exercise.exercise_type),
       target_load_kg: null,
       target_duration_sec: isCardioType(exercise.exercise_type) ? CARDIO_MIN * 60 : null,
     }));

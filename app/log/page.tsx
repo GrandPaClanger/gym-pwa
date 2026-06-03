@@ -72,6 +72,8 @@ const isStrengthType = (exerciseType: number) => !isTimedType(exerciseType);
 const defaultDurationMin = (exerciseType: number) => (isClassType(exerciseType) ? 60 : 8);
 const typeLabel = (exerciseType: number) => (isClassType(exerciseType) ? "Class" : isCardioType(exerciseType) ? "Cardio" : "Strength");
 const typeBadgeClass = (exerciseType: number) => (isClassType(exerciseType) ? "badge-purple" : isCardioType(exerciseType) ? "badge-green" : "badge-blue");
+const targetSetsFor = (exerciseType: number) => (isStrengthType(exerciseType) ? 3 : 1);
+const targetRepsFor = (exerciseType: number) => (isStrengthType(exerciseType) ? 10 : 1);
 
 function parseNumberOrBlank(v: string): number | "" {
   if (v === "") return "";
@@ -459,8 +461,8 @@ export default function LogPage() {
           exercise_id: ex.exercise_id,
           exercise_name: ex.canonical_name,
           exercise_type: ex.exercise_type,
-          target_sets: isStrengthType(ex.exercise_type) ? 3 : null,
-          target_reps: isStrengthType(ex.exercise_type) ? 10 : null,
+          target_sets: targetSetsFor(ex.exercise_type),
+          target_reps: targetRepsFor(ex.exercise_type),
           target_duration_sec: isTimedType(ex.exercise_type) ? defaultDurationMin(ex.exercise_type) * 60 : null,
           suggested_load_kg: null,
           target_load_kg: null,
@@ -538,8 +540,8 @@ export default function LogPage() {
         exercise_id: ex.exercise_id,
         exercise_name: ex.canonical_name,
         exercise_type: ex.exercise_type,
-        target_sets: isStrengthType(ex.exercise_type) ? 3 : null,
-        target_reps: isStrengthType(ex.exercise_type) ? 10 : null,
+        target_sets: targetSetsFor(ex.exercise_type),
+        target_reps: targetRepsFor(ex.exercise_type),
         target_duration_sec: isTimedType(ex.exercise_type) ? defaultDurationMin(ex.exercise_type) * 60 : null,
         suggested_load_kg: null,
         target_load_kg: null,
@@ -591,8 +593,8 @@ export default function LogPage() {
       plan_id: pid,
       sequence_no: maxSeq + (index + 1) * 10,
       exercise_id: ex.exercise_id,
-      target_sets: isStrengthType(ex.exercise_type) ? 3 : null,
-      target_reps: isStrengthType(ex.exercise_type) ? 10 : null,
+      target_sets: targetSetsFor(ex.exercise_type),
+      target_reps: targetRepsFor(ex.exercise_type),
       target_load_kg: null,
       target_duration_sec: isTimedType(ex.exercise_type) ? defaultDurationMin(ex.exercise_type) * 60 : null,
     }));
@@ -647,8 +649,8 @@ export default function LogPage() {
                 exercise_id: ex.exercise_id,
                 exercise_name: ex.canonical_name,
                 exercise_type: ex.exercise_type,
-                target_sets: isStrengthType(ex.exercise_type) ? 3 : null,
-                target_reps: isStrengthType(ex.exercise_type) ? 10 : null,
+                target_sets: targetSetsFor(ex.exercise_type),
+                target_reps: targetRepsFor(ex.exercise_type),
                 target_duration_sec: isTimedType(ex.exercise_type) ? defaultDurationMin(ex.exercise_type) * 60 : null,
               }
             : r
