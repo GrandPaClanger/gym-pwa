@@ -17,8 +17,8 @@ const config: Config = {
         "gym-muted": "#94a3b8",
       },
       fontFamily: {
-        sans: ["var(--font-geist-sans)", "ui-sans-serif", "system-ui", "sans-serif"],
-        mono: ["var(--font-geist-mono)", "ui-monospace", "monospace"],
+        sans: ["ui-sans-serif", "system-ui", "sans-serif"],
+        mono: ["ui-monospace", "monospace"],
       },
     },
   },

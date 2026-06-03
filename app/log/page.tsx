@@ -1,8 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { ExerciseGroup, readExerciseGroups } from "@/lib/exerciseGroups";
 
 type Mode = "plan" | "adhoc";
 
@@ -11,7 +12,7 @@ type PlanRowFromView = {
   sequence_no: number;
   exercise_id: number | null;
   exercise_name: string;
-  exercise_type: number; // 1 strength, 2 cardio
+  exercise_type: number; // 1 strength, 2 cardio, 4 classes
   target_sets: number | null;
   target_reps: number | null;
   target_duration_sec: number | null;
@@ -22,7 +23,7 @@ type PlanRowFromView = {
 type Exercise = {
   exercise_id: number;
   canonical_name: string;
-  exercise_type: number; // 1 strength, 2 cardio
+  exercise_type: number; // 1 strength, 2 cardio, 4 classes
   is_manual_only: boolean;
   is_distance_based: boolean;
   is_active: boolean;
@@ -34,7 +35,7 @@ type Row = {
   sequence_no: number;
   exercise_id: number | null;
   exercise_name: string;
-  exercise_type: number; // 1 or 2
+  exercise_type: number; // 1 strength, 2 cardio, 4 classes
   target_sets: number | null;
   target_reps: number | null;
   target_duration_sec: number | null;
@@ -64,6 +65,13 @@ const REP_MAX = 20;
 const todayIso = () => new Date().toISOString().slice(0, 10);
 const rowKey = (planDate: string, seq: number) => `${planDate}-${seq}`;
 const normName = (s: string) => (s ?? "").trim().toLowerCase();
+const isCardioType = (exerciseType: number) => exerciseType === 2;
+const isClassType = (exerciseType: number) => exerciseType === 4;
+const isTimedType = (exerciseType: number) => isCardioType(exerciseType) || isClassType(exerciseType);
+const isStrengthType = (exerciseType: number) => !isTimedType(exerciseType);
+const defaultDurationMin = (exerciseType: number) => (isClassType(exerciseType) ? 60 : 8);
+const typeLabel = (exerciseType: number) => (isClassType(exerciseType) ? "Class" : isCardioType(exerciseType) ? "Cardio" : "Strength");
+const typeBadgeClass = (exerciseType: number) => (isClassType(exerciseType) ? "badge-purple" : isCardioType(exerciseType) ? "badge-green" : "badge-blue");
 
 function parseNumberOrBlank(v: string): number | "" {
   if (v === "") return "";
@@ -99,6 +107,8 @@ export default function LogPage() {
   const [rows, setRows] = useState<Row[]>([]);
   const [exerciseList, setExerciseList] = useState<Exercise[]>([]);
   const [planId, setPlanId] = useState<number | null>(null);
+  const [groups, setGroups] = useState<ExerciseGroup[]>([]);
+  const [addGroupId, setAddGroupId] = useState("");
 
   const [msg, setMsg] = useState("");
 
@@ -133,6 +143,22 @@ export default function LogPage() {
   const [maxLoadStats, setMaxLoadStats] = useState<Record<number, { max_load_kg: number; times_at_max: number }>>({});
 
   const [googleLoading, setGoogleLoading] = useState(false);
+
+  const loadGroupsFromDb = async () => {
+    const { groups: stored, error } = await readExerciseGroups(supabase);
+    if (error) {
+      setMsg(error);
+      setGroups([]);
+      setAddGroupId("");
+      return;
+    }
+    setGroups(stored);
+    setAddGroupId((current) =>
+      current && stored.some((g) => g.id === current)
+        ? current
+        : stored[0]?.id ?? ""
+    );
+  };
 
   const signInWithGoogle = async () => {
     setGoogleLoading(true);
@@ -218,14 +244,14 @@ export default function LogPage() {
     return m;
   }, [exerciseList]);
 
-  const isDistanceBasedRow = (r: Row) => {
-    if (r.exercise_type !== 2) return false;
+  const isDistanceBasedRow = useCallback((r: Row) => {
+    if (!isCardioType(r.exercise_type)) return false;
 
     if (r.exercise_id != null) return !!exerciseById.get(r.exercise_id)?.is_distance_based;
 
     const byName = exerciseByName.get(normName(r.exercise_name));
     return !!byName?.is_distance_based;
-  };
+  }, [exerciseById, exerciseByName]);
 
   const getPersonId = async (): Promise<number | null> => {
     const { data, error } = await supabase.rpc("my_person_id");
@@ -349,7 +375,7 @@ export default function LogPage() {
 
     for (const row of src) {
       const k = rowKey(planDate, row.sequence_no);
-      if (row.exercise_type === 1) {
+      if (isStrengthType(row.exercise_type)) {
         nextSets[k] = row.target_sets ?? 3;
         nextReps[k] = row.target_reps ?? 10;
         const d = getRowDefaultLoad(row);
@@ -383,14 +409,8 @@ export default function LogPage() {
 
   const refreshPlan = async () => {
     setMsg("");
-    const { error } = await supabase.rpc("generate_plan", {
-      p_days: 1,
-      p_start_date: todayIso(),
-    });
-    if (error) return setMsg(error.message);
-
     await loadTodayPlanRows();
-    setMsg("Plan refreshed.");
+    setMsg("Plan reloaded.");
   };
 
   const queueAutosave = (sequence_no: number, patch: PlanItemPatch) => {
@@ -439,15 +459,15 @@ export default function LogPage() {
           exercise_id: ex.exercise_id,
           exercise_name: ex.canonical_name,
           exercise_type: ex.exercise_type,
-          target_sets: ex.exercise_type === 1 ? 3 : null,
-          target_reps: ex.exercise_type === 1 ? 10 : null,
-          target_duration_sec: ex.exercise_type === 2 ? 8 * 60 : null,
+          target_sets: isStrengthType(ex.exercise_type) ? 3 : null,
+          target_reps: isStrengthType(ex.exercise_type) ? 10 : null,
+          target_duration_sec: isTimedType(ex.exercise_type) ? defaultDurationMin(ex.exercise_type) * 60 : null,
           suggested_load_kg: null,
           target_load_kg: null,
         },
       ]);
 
-      if (ex.exercise_type === 1) {
+      if (isStrengthType(ex.exercise_type)) {
         setSets((p) => ({ ...p, [k]: 3 }));
         setReps((p) => ({ ...p, [k]: 10 }));
         setLoads((p) => ({ ...p, [k]: "" }));
@@ -481,7 +501,7 @@ export default function LogPage() {
       target_load_kg: null,
       target_duration_sec: null,
     };
-    if (ex.exercise_type === 2) insertRow.target_duration_sec = 8 * 60;
+    if (isTimedType(ex.exercise_type)) insertRow.target_duration_sec = defaultDurationMin(ex.exercise_type) * 60;
 
     const { error } = await supabase.from("workout_plan_item").insert(insertRow);
     if (error) return setMsg(error.message);
@@ -489,6 +509,104 @@ export default function LogPage() {
     setAddExerciseId("");
     await loadTodayPlanRows();
     setMsg("Exercise added.");
+  };
+
+  const addExerciseGroup = async () => {
+    setMsg("");
+    const group = groups.find((g) => g.id === addGroupId);
+    if (!group) return setMsg("Select an exercise group.");
+
+    const groupExercises = group.exerciseIds
+      .map((id) => exerciseById.get(id))
+      .filter((e): e is Exercise => !!e);
+    if (groupExercises.length === 0) return setMsg("That group has no active exercises.");
+
+    const existingIds = new Set(rows.map((r) => r.exercise_id).filter((id): id is number => id != null));
+    const toAdd = groupExercises.filter((e) => !existingIds.has(e.exercise_id));
+    if (toAdd.length === 0) {
+      return setMsg("All exercises in that group are already in this session.");
+    }
+
+    const planDate = todayIso();
+    const maxSeq = rows.reduce((m, r) => Math.max(m, r.sequence_no), 0);
+
+    if (mode === "adhoc") {
+      const newRows = toAdd.map<Row>((ex, index) => ({
+        source: "adhoc",
+        plan_date: planDate,
+        sequence_no: maxSeq + (index + 1) * 10,
+        exercise_id: ex.exercise_id,
+        exercise_name: ex.canonical_name,
+        exercise_type: ex.exercise_type,
+        target_sets: isStrengthType(ex.exercise_type) ? 3 : null,
+        target_reps: isStrengthType(ex.exercise_type) ? 10 : null,
+        target_duration_sec: isTimedType(ex.exercise_type) ? defaultDurationMin(ex.exercise_type) * 60 : null,
+        suggested_load_kg: null,
+        target_load_kg: null,
+      }));
+
+      setRows((prev) => [...prev, ...newRows]);
+      setSets((prev) => {
+        const next = { ...prev };
+        for (const row of newRows) if (isStrengthType(row.exercise_type)) next[rowKey(planDate, row.sequence_no)] = 3;
+        return next;
+      });
+      setReps((prev) => {
+        const next = { ...prev };
+        for (const row of newRows) if (isStrengthType(row.exercise_type)) next[rowKey(planDate, row.sequence_no)] = 10;
+        return next;
+      });
+      setLoads((prev) => {
+        const next = { ...prev };
+        for (const row of newRows) if (isStrengthType(row.exercise_type)) next[rowKey(planDate, row.sequence_no)] = "";
+        return next;
+      });
+      setDurationsMin((prev) => {
+        const next = { ...prev };
+        for (const row of newRows) if (isTimedType(row.exercise_type)) next[rowKey(planDate, row.sequence_no)] = defaultDurationMin(row.exercise_type);
+        return next;
+      });
+      setCaloriesKcal((prev) => {
+        const next = { ...prev };
+        for (const row of newRows) {
+          const ex = exerciseById.get(row.exercise_id ?? 0);
+          if (isCardioType(row.exercise_type) && ex?.is_distance_based) next[rowKey(planDate, row.sequence_no)] = "";
+        }
+        return next;
+      });
+
+      const skipped = groupExercises.length - toAdd.length;
+      setMsg(
+        skipped > 0
+          ? `Added ${toAdd.length} from "${group.name}" (${skipped} already present).`
+          : `Added ${toAdd.length} from "${group.name}".`
+      );
+      return;
+    }
+
+    const pid = await requirePlanId();
+    if (!pid) return setMsg("No plan loaded. Click Refresh plan.");
+
+    const insertRows = toAdd.map((ex, index) => ({
+      plan_id: pid,
+      sequence_no: maxSeq + (index + 1) * 10,
+      exercise_id: ex.exercise_id,
+      target_sets: isStrengthType(ex.exercise_type) ? 3 : null,
+      target_reps: isStrengthType(ex.exercise_type) ? 10 : null,
+      target_load_kg: null,
+      target_duration_sec: isTimedType(ex.exercise_type) ? defaultDurationMin(ex.exercise_type) * 60 : null,
+    }));
+
+    const { error } = await supabase.from("workout_plan_item").insert(insertRows);
+    if (error) return setMsg(error.message);
+
+    await loadTodayPlanRows();
+    const skipped = groupExercises.length - toAdd.length;
+    setMsg(
+      skipped > 0
+        ? `Added ${toAdd.length} from "${group.name}" (${skipped} already present).`
+        : `Added ${toAdd.length} from "${group.name}".`
+    );
   };
 
   const removeRow = async (sequence_no: number) => {
@@ -529,16 +647,16 @@ export default function LogPage() {
                 exercise_id: ex.exercise_id,
                 exercise_name: ex.canonical_name,
                 exercise_type: ex.exercise_type,
-                target_sets: ex.exercise_type === 1 ? 3 : null,
-                target_reps: ex.exercise_type === 1 ? 10 : null,
-                target_duration_sec: ex.exercise_type === 2 ? 8 * 60 : null,
+                target_sets: isStrengthType(ex.exercise_type) ? 3 : null,
+                target_reps: isStrengthType(ex.exercise_type) ? 10 : null,
+                target_duration_sec: isTimedType(ex.exercise_type) ? defaultDurationMin(ex.exercise_type) * 60 : null,
               }
             : r
         )
       );
       clearLocalEditsForKey(k);
-      if (ex.exercise_type === 1) setLoads((p) => ({ ...p, [k]: "" }));
-      if (ex.exercise_type === 2 && ex.is_distance_based) setCaloriesKcal((p) => ({ ...p, [k]: "" }));
+      if (isStrengthType(ex.exercise_type)) setLoads((p) => ({ ...p, [k]: "" }));
+      if (isCardioType(ex.exercise_type) && ex.is_distance_based) setCaloriesKcal((p) => ({ ...p, [k]: "" }));
       setMsg("Swapped.");
       return;
     }
@@ -551,7 +669,7 @@ export default function LogPage() {
       target_sets: 3,
       target_reps: 10,
       target_load_kg: null,
-      target_duration_sec: ex.exercise_type === 2 ? 8 * 60 : null,
+      target_duration_sec: isTimedType(ex.exercise_type) ? defaultDurationMin(ex.exercise_type) * 60 : null,
     };
 
     const { error } = await supabase
@@ -617,7 +735,7 @@ export default function LogPage() {
 
   const loadMaxLoadStats = async (strengthRows: Row[]) => {
     const ids = strengthRows
-      .filter((r) => r.exercise_type === 1 && r.exercise_id != null)
+      .filter((r) => isStrengthType(r.exercise_type) && r.exercise_id != null)
       .map((r) => r.exercise_id as number);
     if (ids.length === 0) return;
 
@@ -661,7 +779,7 @@ export default function LogPage() {
     for (const r of rows) {
       const k = rowKey(planDate, r.sequence_no);
 
-      if (r.exercise_type === 2) {
+      if (isTimedType(r.exercise_type)) {
         const defaultMins = Math.round((r.target_duration_sec ?? 0) / 60);
         const mins = (durationsMin[k] ?? defaultMins) as number | "";
         const minutes = mins === "" ? defaultMins : Number(mins);
@@ -695,7 +813,7 @@ export default function LogPage() {
     }
 
     return out;
-  }, [rows, sets, reps, loads, durationsMin, caloriesKcal, exerciseById, exerciseByName]);
+  }, [rows, sets, reps, loads, durationsMin, caloriesKcal, isDistanceBasedRow]);
 
   const saveSession = async () => {
     setMsg("");
@@ -704,7 +822,7 @@ export default function LogPage() {
     if (!ss) ss = ensureSessionStart();
 
     for (const r of rows) {
-      if (r.exercise_type !== 1) continue;
+      if (!isStrengthType(r.exercise_type)) continue;
       const k = rowKey(todayIso(), r.sequence_no);
       const defaultReps = r.target_reps ?? 10;
       const repRaw = reps[k] ?? defaultReps;
@@ -747,6 +865,7 @@ export default function LogPage() {
 
         const authed = !!data?.session;
         setIsAuthed(authed);
+        if (data.session?.user.id) await loadGroupsFromDb();
         setAuthReady(true);
 
         if (authed) safeEnsureSessionStart();
@@ -759,10 +878,15 @@ export default function LogPage() {
       }
     })();
 
-    const { data: sub } = supabase.auth.onAuthStateChange((_evt, session) => {
+    const { data: sub } = supabase.auth.onAuthStateChange(async (_evt, session) => {
       if (!mounted) return;
 
       setIsAuthed(!!session);
+      if (session?.user.id) await loadGroupsFromDb();
+      else {
+        setGroups([]);
+        setAddGroupId("");
+      }
       setAuthReady(true);
 
       if (session) safeEnsureSessionStart();
@@ -779,6 +903,7 @@ export default function LogPage() {
       clearTimeout(t);
       sub.subscription.unsubscribe();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -814,6 +939,14 @@ export default function LogPage() {
     if (!q) return exerciseList;
     return exerciseList.filter((e) => e.canonical_name.toLowerCase().includes(q));
   }, [exerciseList, addExerciseQuery]);
+
+  const selectedGroupExercises = useMemo(() => {
+    const group = groups.find((g) => g.id === addGroupId);
+    if (!group) return [];
+    return group.exerciseIds
+      .map((id) => exerciseById.get(id))
+      .filter((e): e is Exercise => !!e);
+  }, [addGroupId, exerciseById, groups]);
 
   // ── Loading / auth-check state ────────────────────────────────────────────
   if (!authReady) {
@@ -890,14 +1023,14 @@ export default function LogPage() {
 
   // ── Main logged-in view ───────────────────────────────────────────────────
   return (
-    <main className="min-h-screen bg-gym-bg pb-24">
-      <div className="max-w-2xl mx-auto px-4 py-6 space-y-4">
+    <main className="min-h-screen bg-gym-bg pb-20">
+      <div className="max-w-2xl mx-auto px-2 py-2 space-y-2 sm:px-4 sm:py-6 sm:space-y-4">
 
         {/* Header */}
-        <div className="card flex items-center justify-between gap-4 flex-wrap">
+        <div className="card flex items-center justify-between gap-2 flex-wrap sm:gap-4">
           <div>
             <p className="section-title">Log Session</p>
-            <h1 className="text-xl font-bold text-slate-100 mt-0.5 flex items-center gap-2">
+            <h1 className="text-base font-bold text-slate-100 mt-0.5 flex items-center gap-2 sm:text-xl">
               {todayIso()}
               <span className={`badge ${mode === "plan" ? "badge-blue" : "badge-slate"}`}>
                 {mode === "plan" ? "Plan" : "Ad-hoc"}
@@ -911,7 +1044,7 @@ export default function LogPage() {
         </div>
 
         {/* Toolbar */}
-        <div className="flex gap-2 flex-wrap items-center">
+        <div className="flex gap-1.5 flex-wrap items-center sm:gap-2">
           <button onClick={() => void refreshPlan()} className="btn-secondary">
             Refresh plan
           </button>
@@ -942,7 +1075,7 @@ export default function LogPage() {
         )}
 
         {/* Add exercise */}
-        <div className="card space-y-3">
+        <div className="card space-y-2 sm:space-y-3">
           <p className="section-title">Add exercise</p>
           <div className="flex flex-col sm:flex-row gap-2">
             <input
@@ -971,8 +1104,46 @@ export default function LogPage() {
           </div>
         </div>
 
+        {/* Add exercise group */}
+        <div className="card space-y-2 sm:space-y-3">
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <div>
+              <p className="section-title">Add group</p>
+              {selectedGroupExercises.length > 0 && (
+                <p className="text-xs text-slate-500 mt-1">
+                  {selectedGroupExercises.map((e) => e.canonical_name).join(", ")}
+                </p>
+              )}
+            </div>
+            <Link href="/admin/exercises" className="btn-ghost">
+              Manage groups
+            </Link>
+          </div>
+          <div className="flex flex-col sm:flex-row gap-2">
+            <select
+              value={addGroupId}
+              onChange={(e) => setAddGroupId(e.target.value)}
+              className="input flex-1"
+            >
+              <option value="">Select group...</option>
+              {groups.map((g) => (
+                <option key={g.id} value={g.id}>
+                  {g.name} ({g.exerciseIds.length})
+                </option>
+              ))}
+            </select>
+            <button
+              onClick={() => void addExerciseGroup()}
+              disabled={!addGroupId}
+              className="btn-primary shrink-0"
+            >
+              Add Group
+            </button>
+          </div>
+        </div>
+
         {/* Exercise cards */}
-        <div className="space-y-3">
+        <div className="space-y-2 sm:space-y-3">
           {rows.length === 0 && (
             <div className="card text-center text-slate-400 py-8">
               <p>No exercises. Load a plan or add exercises above.</p>
@@ -998,15 +1169,15 @@ export default function LogPage() {
             const exNoteVal = exId ? (exerciseNotes[exId] ?? "") : "";
 
             return (
-              <div key={k} className="card space-y-3">
+              <div key={k} className="card space-y-2 sm:space-y-3">
                 {/* Card header */}
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-xs text-slate-500 font-mono">{r.sequence_no}</span>
                       <h3 className="font-semibold text-slate-100 truncate">{r.exercise_name}</h3>
-                      <span className={r.exercise_type === 2 ? "badge-green" : "badge-blue"}>
-                        {r.exercise_type === 2 ? "Cardio" : "Strength"}
+                      <span className={typeBadgeClass(r.exercise_type)}>
+                        {typeLabel(r.exercise_type)}
                       </span>
                     </div>
                   </div>
@@ -1019,7 +1190,7 @@ export default function LogPage() {
                 </div>
 
                 {/* Max load stats for progressive overload guidance */}
-                {r.exercise_type === 1 && exId != null && maxLoadStats[exId] != null && (
+                {isStrengthType(r.exercise_type) && exId != null && maxLoadStats[exId] != null && (
                   <div className="flex items-center justify-center gap-2 text-xs">
                     <span className="text-slate-400">Best:</span>
                     <span className="font-semibold text-amber-400">{maxLoadStats[exId].max_load_kg} kg</span>
@@ -1030,8 +1201,10 @@ export default function LogPage() {
 
                 {/* Quick exercise note */}
                 {exId != null && (
-                  <div>
-                    <label className="label">Quick note</label>
+                  <details open={!!exNoteVal} className="rounded-lg border border-slate-700 bg-slate-900/30 p-2">
+                    <summary className="cursor-pointer text-xs font-medium uppercase tracking-wide text-slate-400">
+                      Quick note
+                    </summary>
                     <input
                       type="text"
                       value={exNoteVal}
@@ -1042,13 +1215,13 @@ export default function LogPage() {
                         queueSaveExerciseNote(exId, v);
                       }}
                       placeholder='e.g. "2 sets @10, 1 @9"'
-                      className="input"
+                      className="input mt-2"
                     />
-                  </div>
+                  </details>
                 )}
 
                 {/* Strength inputs */}
-                {r.exercise_type === 1 && (
+                {isStrengthType(r.exercise_type) && (
                   <div className="grid grid-cols-3 gap-3">
                     <div>
                       <label className="label">Reps</label>
@@ -1095,8 +1268,8 @@ export default function LogPage() {
                   </div>
                 )}
 
-                {/* Cardio inputs */}
-                {r.exercise_type === 2 && (
+                {/* Timed inputs */}
+                {isTimedType(r.exercise_type) && (
                   <div className="flex gap-3 flex-wrap items-end">
                     <div>
                       <label className="label">Target</label>
@@ -1136,8 +1309,10 @@ export default function LogPage() {
                 )}
 
                 {/* Swap exercise */}
-                <div>
-                  <label className="label">Swap exercise</label>
+                <details className="rounded-lg border border-slate-700 bg-slate-900/30 p-2">
+                  <summary className="cursor-pointer text-xs font-medium uppercase tracking-wide text-slate-400">
+                    Swap exercise
+                  </summary>
                   <select
                     value={swapPick[k] ?? ""}
                     onChange={(e) => {
@@ -1148,7 +1323,7 @@ export default function LogPage() {
                       void replaceExercise(r.sequence_no, id);
                       setSwapPick((p) => ({ ...p, [k]: "" }));
                     }}
-                    className="input"
+                    className="input mt-2"
                   >
                     <option value="">Swap…</option>
                     {exerciseList.map((e) => (
@@ -1159,7 +1334,7 @@ export default function LogPage() {
                       </option>
                     ))}
                   </select>
-                </div>
+                </details>
               </div>
             );
           })}
@@ -1194,7 +1369,7 @@ export default function LogPage() {
       </div>
 
       {/* Sticky save footer */}
-      <div className="fixed bottom-0 left-0 right-0 border-t border-slate-700 bg-slate-900/95 backdrop-blur-sm px-4 py-3">
+      <div className="fixed bottom-0 left-0 right-0 border-t border-slate-700 bg-slate-900/95 backdrop-blur-sm px-3 py-2 sm:px-4 sm:py-3">
         <div className="max-w-2xl mx-auto">
           <button onClick={() => void saveSession()} className="btn-primary w-full text-base py-3">
             Save Session

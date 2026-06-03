@@ -3,15 +3,24 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import {
+  createExerciseGroup,
+  deleteExerciseGroup as deleteExerciseGroupFromDb,
+  ExerciseGroup,
+  readExerciseGroups,
+  updateExerciseGroup,
+} from "@/lib/exerciseGroups";
 
 type Exercise = {
   exercise_id: number;
   canonical_name: string;
-  exercise_type: 1 | 2 | 3;
+  exercise_type: ExerciseType;
   is_manual_only: boolean;
   is_distance_based: boolean;
   is_active: boolean;
 };
+
+type ExerciseType = 1 | 2 | 3 | 4;
 
 const norm = (s: string) => (s ?? "").trim().toLowerCase();
 
@@ -27,6 +36,7 @@ export default function AdminExercisesPage() {
   const [isAdmin, setIsAdmin] = useState(false);
   const [msg, setMsg] = useState("");
   const [loading, setLoading] = useState(true);
+  const [userId, setUserId] = useState("");
 
   const [items, setItems] = useState<Exercise[]>([]);
   const [slotCodes, setSlotCodes] = useState<string[]>([]);
@@ -36,7 +46,7 @@ export default function AdminExercisesPage() {
 
   // Create
   const [newName, setNewName] = useState("");
-  const [newType, setNewType] = useState<1 | 2 | 3>(1);
+  const [newType, setNewType] = useState<ExerciseType>(1);
   const [newManual, setNewManual] = useState(false);
   const [newDistance, setNewDistance] = useState(false);
   const [newActive, setNewActive] = useState(true);
@@ -49,7 +59,7 @@ export default function AdminExercisesPage() {
     [items, selectedId]
   );
   const [editName, setEditName] = useState("");
-  const [editType, setEditType] = useState<1 | 2 | 3>(1);
+  const [editType, setEditType] = useState<ExerciseType>(1);
   const [editManual, setEditManual] = useState(false);
   const [editDistance, setEditDistance] = useState(false);
   const [editActive, setEditActive] = useState(true);
@@ -58,11 +68,56 @@ export default function AdminExercisesPage() {
   const [mapSlot, setMapSlot] = useState("");
   const [mapBaseWeight, setMapBaseWeight] = useState<number | "">(1);
 
+  // Exercise groups
+  const [groups, setGroups] = useState<ExerciseGroup[]>([]);
+  const [groupSearch, setGroupSearch] = useState("");
+  const [groupName, setGroupName] = useState("");
+  const [groupExerciseIds, setGroupExerciseIds] = useState<number[]>([]);
+  const [selectedGroupId, setSelectedGroupId] = useState("");
+  const [groupPickerOpen, setGroupPickerOpen] = useState(false);
+
   const filtered = useMemo(() => {
     const q = norm(search);
     if (!q) return items;
     return items.filter((e) => norm(e.canonical_name).includes(q));
   }, [items, search]);
+
+  const activeExercises = useMemo(
+    () => items.filter((e) => e.is_active),
+    [items]
+  );
+
+  const filteredGroupExercises = useMemo(() => {
+    const q = norm(groupSearch);
+    if (!q) return activeExercises;
+    return activeExercises.filter((e) => norm(e.canonical_name).includes(q));
+  }, [activeExercises, groupSearch]);
+
+  const selectedGroup = useMemo(
+    () => groups.find((g) => g.id === selectedGroupId) ?? null,
+    [groups, selectedGroupId]
+  );
+
+  const selectedGroupExerciseNames = useMemo(() => {
+    const byId = new Map(items.map((e) => [e.exercise_id, e.canonical_name]));
+    return selectedGroup?.exerciseIds.map((id) => byId.get(id)).filter(Boolean) ?? [];
+  }, [items, selectedGroup]);
+
+  const loadGroupsFromDb = async () => {
+    const { groups: stored, error } = await readExerciseGroups(supabase);
+    if (error) {
+      setMsg(error);
+      setGroups([]);
+      setSelectedGroupId("");
+      return;
+    }
+    setGroups(stored);
+    setSelectedGroupId((current) =>
+      current && stored.some((g) => g.id === current)
+        ? current
+        : stored[0]?.id ?? ""
+    );
+  };
 
   const loadAll = async () => {
     setMsg("");
@@ -101,7 +156,7 @@ export default function AdminExercisesPage() {
     }) => ({
       exercise_id: Number(r.exercise_id),
       canonical_name: String(r.canonical_name),
-      exercise_type: Number(r.exercise_type) as 1 | 2 | 3,
+      exercise_type: Number(r.exercise_type) as ExerciseType,
       is_manual_only: !!r.is_manual_only,
       is_distance_based: !!r.is_distance_based,
       is_active: !!r.is_active,
@@ -123,10 +178,18 @@ export default function AdminExercisesPage() {
     (async () => {
       const { data } = await supabase.auth.getSession();
       setIsAuthed(!!data.session);
+      setUserId(data.session?.user.id ?? "");
+      if (data.session?.user.id) await loadGroupsFromDb();
       setAuthReady(true);
     })();
-    const { data: sub } = supabase.auth.onAuthStateChange((_evt, session) => {
+    const { data: sub } = supabase.auth.onAuthStateChange(async (_evt, session) => {
       setIsAuthed(!!session);
+      setUserId(session?.user.id ?? "");
+      if (session?.user.id) await loadGroupsFromDb();
+      else {
+        setGroups([]);
+        setSelectedGroupId("");
+      }
       setAuthReady(true);
     });
     return () => sub.subscription.unsubscribe();
@@ -173,12 +236,13 @@ export default function AdminExercisesPage() {
     const name = newName.trim();
     if (!name) return setMsg("Enter a name.");
 
+    const isClass = newType === 4;
     const dist = newType === 2 ? newDistance : false;
 
     const res = await supabase.rpc("admin_create_exercise", {
       p_canonical_name: name,
       p_exercise_type: newType,
-      p_is_manual_only: newManual,
+      p_is_manual_only: isClass ? true : newManual,
       p_is_distance_based: dist,
       p_is_active: newActive,
     });
@@ -188,7 +252,7 @@ export default function AdminExercisesPage() {
     const newId = Number(res.data);
     if (!Number.isFinite(newId)) return setMsg("Create failed: invalid return.");
 
-    if (newSlot.trim()) {
+    if (!isClass && newSlot.trim()) {
       const bw = newBaseWeight === "" ? 1 : Number(newBaseWeight);
       const baseWeight = Number.isFinite(bw) ? bw : 1;
 
@@ -224,12 +288,13 @@ export default function AdminExercisesPage() {
     const name = editName.trim();
     if (!name) return setMsg("Name cannot be blank.");
 
+    const isClass = editType === 4;
     const dist = editType === 2 ? editDistance : false;
 
     const res = await supabase.rpc("admin_update_exercise", {
       p_exercise_id: selected.exercise_id,
       p_exercise_type: editType,
-      p_is_manual_only: editManual,
+      p_is_manual_only: isClass ? true : editManual,
       p_is_distance_based: dist,
       p_is_active: editActive,
     });
@@ -237,7 +302,7 @@ export default function AdminExercisesPage() {
     if (res.error) return setMsg(res.error.message);
 
     await loadAll();
-    setSelectedId(selected.exercise_id);
+    setSelectedId(null);
     setMsg("Saved.");
   };
 
@@ -260,8 +325,72 @@ export default function AdminExercisesPage() {
     setMsg("Mapped.");
   };
 
-  const typeLabel = (t: 1 | 2 | 3) => ({ 1: "Strength", 2: "Cardio", 3: "Other" }[t] ?? "—");
-  const typeBadgeClass = (t: 1 | 2 | 3) => ({ 1: "badge-blue", 2: "badge-green", 3: "badge-slate" }[t] ?? "badge-slate");
+  const startNewGroup = () => {
+    setSelectedGroupId("");
+    setGroupName("");
+    setGroupExerciseIds([]);
+    setGroupSearch("");
+    setGroupPickerOpen(true);
+    setMsg("New group ready. Name it, choose exercises, then press Create Group.");
+  };
+
+  const loadGroupIntoForm = (groupId: string) => {
+    const group = groups.find((g) => g.id === groupId);
+    setSelectedGroupId(groupId);
+    setGroupName(group?.name ?? "");
+    setGroupExerciseIds(group?.exerciseIds ?? []);
+    setGroupSearch("");
+    setGroupPickerOpen(true);
+    setMsg("");
+  };
+
+  const toggleGroupExercise = (exerciseId: number) => {
+    setGroupExerciseIds((prev) =>
+      prev.includes(exerciseId)
+        ? prev.filter((id) => id !== exerciseId)
+        : [...prev, exerciseId]
+    );
+  };
+
+  const saveExerciseGroup = async () => {
+    setMsg("");
+    if (!userId) return setMsg("Sign in before saving groups.");
+
+    const name = groupName.trim();
+    const exerciseIds = Array.from(new Set(groupExerciseIds));
+    if (!name) return setMsg("Group name is required.");
+    if (exerciseIds.length === 0) return setMsg("Choose at least one exercise for the group.");
+
+    if (selectedGroupId) {
+      const { error } = await updateExerciseGroup(supabase, selectedGroupId, name, exerciseIds);
+      if (error) return setMsg(error);
+      await loadGroupsFromDb();
+      setSelectedGroupId(selectedGroupId);
+      setGroupPickerOpen(false);
+      setMsg("Exercise group saved.");
+      return;
+    }
+
+    const { group, error } = await createExerciseGroup(supabase, name, exerciseIds);
+    if (error || !group) return setMsg(error ?? "Exercise group could not be created.");
+    await loadGroupsFromDb();
+    setSelectedGroupId(group.id);
+    setGroupPickerOpen(false);
+    setMsg("Exercise group created.");
+  };
+
+  const deleteExerciseGroup = async () => {
+    setMsg("");
+    if (!selectedGroupId) return setMsg("Select a group first.");
+    const { error } = await deleteExerciseGroupFromDb(supabase, selectedGroupId);
+    if (error) return setMsg(error);
+    await loadGroupsFromDb();
+    startNewGroup();
+    setMsg("Exercise group deleted.");
+  };
+
+  const typeLabel = (t: ExerciseType) => ({ 1: "Strength", 2: "Cardio", 3: "Other", 4: "Class" }[t] ?? "—");
+  const typeBadgeClass = (t: ExerciseType) => ({ 1: "badge-blue", 2: "badge-green", 3: "badge-slate", 4: "badge-purple" }[t] ?? "badge-slate");
 
   // Wait for session check before deciding — prevents flash of "Please sign in"
   if (!authReady) {
@@ -291,13 +420,13 @@ export default function AdminExercisesPage() {
 
   return (
     <main className="min-h-screen bg-gym-bg">
-      <div className="max-w-6xl mx-auto px-4 py-6 space-y-5">
+      <div className="max-w-3xl mx-auto px-2 py-2 space-y-2 sm:px-4 sm:py-6 sm:space-y-5">
 
         {/* Header */}
-        <div className="card flex items-center justify-between gap-4 flex-wrap">
+        <div className="card flex items-center justify-between gap-2 flex-wrap sm:gap-4">
           <div>
             <p className="section-title">Admin</p>
-            <h1 className="text-2xl font-bold text-slate-100 mt-0.5">Exercise Maintenance</h1>
+            <h1 className="text-lg font-bold text-slate-100 mt-0.5 sm:text-2xl">Exercise Maintenance</h1>
           </div>
           <Link href="/" className="btn-ghost">← Today&apos;s Plan</Link>
         </div>
@@ -342,16 +471,29 @@ export default function AdminExercisesPage() {
 
                 <div>
                   <label className="label">Type</label>
-                  <select value={newType} onChange={(e) => setNewType(Number(e.target.value) as 1 | 2 | 3)} className="input">
+                  <select
+                    value={newType}
+                    onChange={(e) => {
+                      const nextType = Number(e.target.value) as ExerciseType;
+                      setNewType(nextType);
+                      if (nextType === 4) {
+                        setNewManual(true);
+                        setNewDistance(false);
+                        setNewSlot("");
+                      }
+                    }}
+                    className="input"
+                  >
                     <option value={1}>Strength</option>
                     <option value={2}>Cardio</option>
                     <option value={3}>Other</option>
+                    <option value={4}>Class</option>
                   </select>
                 </div>
 
                 <div>
                   <label className="label">Slot mapping</label>
-                  <select value={newSlot} onChange={(e) => setNewSlot(e.target.value)} className="input">
+                  <select value={newSlot} onChange={(e) => setNewSlot(e.target.value)} disabled={newType === 4} className="input">
                     <option value="">(No slot mapping)</option>
                     {slotCodes.map((s) => <option key={s} value={s}>{s}</option>)}
                   </select>
@@ -370,7 +512,13 @@ export default function AdminExercisesPage() {
 
                 <div className="flex items-end gap-6 pb-1">
                   <label className="flex items-center gap-2 cursor-pointer text-slate-300 text-sm">
-                    <input type="checkbox" checked={newManual} onChange={(e) => setNewManual(e.target.checked)} className="w-4 h-4 accent-blue-500" />
+                    <input
+                      type="checkbox"
+                      checked={newType === 4 ? true : newManual}
+                      onChange={(e) => setNewManual(e.target.checked)}
+                      disabled={newType === 4}
+                      className="w-4 h-4 accent-blue-500"
+                    />
                     Manual-only
                   </label>
                   <label className={`flex items-center gap-2 cursor-pointer text-sm ${newType === 2 ? "text-slate-300" : "text-slate-600"}`}>
@@ -390,22 +538,144 @@ export default function AdminExercisesPage() {
                 </div>
               </div>
 
-              <button onClick={() => void createExercise()} className="btn-primary">
+            <button onClick={() => void createExercise()} className="btn-primary">
                 Create Exercise
               </button>
             </div>
 
-            {/* Two-column layout: list + detail */}
-            <div className="grid grid-cols-1 lg:grid-cols-[360px_1fr] gap-4 lg:items-start">
+            {/* Exercise groups */}
+            <div className="card space-y-4">
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <div>
+                  <p className="section-title">Exercise groups</p>
+                  <h2 className="text-lg font-semibold text-slate-100 mt-0.5">
+                    Create and edit groups
+                  </h2>
+                </div>
+                <button onClick={startNewGroup} className="btn-secondary">
+                  New Group
+                </button>
+              </div>
+
+              <div className="space-y-3">
+                <div className="space-y-3">
+                  <p className="text-sm text-slate-400">
+                    Saved groups ({groups.length})
+                  </p>
+                  <div className="space-y-1 max-h-64 overflow-y-auto">
+                    {groups.length === 0 ? (
+                      <div className="rounded-lg border border-slate-700 px-3 py-4 text-sm text-slate-500">
+                        No groups created yet.
+                      </div>
+                    ) : (
+                      groups.map((g) => (
+                        <button
+                          key={g.id}
+                          onClick={() => loadGroupIntoForm(g.id)}
+                          className={`w-full text-left rounded-lg px-3 py-2.5 transition-colors ${
+                            selectedGroupId === g.id
+                              ? "bg-blue-900/50 border border-blue-700"
+                              : "hover:bg-slate-700/50"
+                          }`}
+                        >
+                          <span className="block font-medium text-slate-100 text-sm truncate">{g.name}</span>
+                          <span className="text-xs text-slate-500">{g.exerciseIds.length} exercises</span>
+                        </button>
+                      ))
+                    )}
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  <div>
+                    <label className="label">Group name</label>
+                    <input
+                      value={groupName}
+                      onChange={(e) => setGroupName(e.target.value)}
+                      placeholder="e.g. Push day"
+                      className="input"
+                    />
+                  </div>
+
+                  <details
+                    open={groupPickerOpen}
+                    onToggle={(e) => setGroupPickerOpen(e.currentTarget.open)}
+                    className="rounded-lg border border-slate-700 bg-slate-900/30 p-3"
+                  >
+                    <summary className="cursor-pointer text-sm font-medium text-slate-200">
+                      Choose exercises ({groupExerciseIds.length} selected)
+                    </summary>
+                    <input
+                      value={groupSearch}
+                      onChange={(e) => setGroupSearch(e.target.value)}
+                      placeholder="Search active exercises..."
+                      className="input mb-2 mt-3"
+                    />
+                    <div className="max-h-72 overflow-y-auto rounded-lg border border-slate-700 divide-y divide-slate-700">
+                      {filteredGroupExercises.length === 0 ? (
+                        <div className="px-3 py-4 text-sm text-slate-500">No matching active exercises.</div>
+                      ) : (
+                        filteredGroupExercises.map((e) => (
+                          <label
+                            key={e.exercise_id}
+                            className="flex items-center gap-3 px-3 py-2.5 text-sm text-slate-200 cursor-pointer hover:bg-slate-700/60"
+                          >
+                            <input
+                              type="checkbox"
+                              checked={groupExerciseIds.includes(e.exercise_id)}
+                              onChange={() => toggleGroupExercise(e.exercise_id)}
+                              className="w-4 h-4 accent-blue-500 shrink-0"
+                            />
+                            <span className="flex-1 min-w-0 truncate">{e.canonical_name}</span>
+                            <span className={typeBadgeClass(e.exercise_type)}>
+                              {typeLabel(e.exercise_type)}
+                            </span>
+                          </label>
+                        ))
+                      )}
+                    </div>
+                  </details>
+
+                  {selectedGroup && selectedGroupExerciseNames.length > 0 && (
+                    <div className="flex flex-wrap gap-2">
+                      {selectedGroupExerciseNames.map((name) => (
+                        <span key={name} className="badge-slate">{name}</span>
+                      ))}
+                    </div>
+                  )}
+
+                  <div className="flex items-center justify-between gap-3 flex-wrap">
+                    <span className="text-sm text-slate-500">
+                      {groupExerciseIds.length} selected
+                    </span>
+                    <div className="flex gap-2">
+                      {selectedGroupId && (
+                        <button onClick={deleteExerciseGroup} className="btn-danger">
+                          Delete
+                        </button>
+                      )}
+                      <button onClick={saveExerciseGroup} className="btn-primary">
+                        {selectedGroupId ? "Save Group" : "Create Group"}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Exercise maintenance */}
+            <div className="space-y-3">
 
               {/* Exercise list */}
-              <div className="card space-y-3">
-                <p className="section-title">Exercises ({filtered.length})</p>
+              <details className="card">
+                <summary className="cursor-pointer">
+                  <span className="section-title">Exercises ({filtered.length})</span>
+                </summary>
                 <input
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
                   placeholder="Search…"
-                  className="input"
+                  className="input mt-3"
                 />
                 <div className="space-y-0.5 max-h-[40vh] lg:max-h-[520px] overflow-y-auto -mx-4 px-4">
                   {filtered.map((e) => (
@@ -433,10 +703,10 @@ export default function AdminExercisesPage() {
                     </button>
                   ))}
                 </div>
-              </div>
+              </details>
 
               {/* Detail / edit panel */}
-              <div className="card space-y-5">
+              <div className="card space-y-4 sm:space-y-5">
                 {!selected ? (
                   <div className="text-center text-slate-500 py-16">
                     Select an exercise from the list to edit it.
@@ -456,16 +726,35 @@ export default function AdminExercisesPage() {
 
                       <div>
                         <label className="label">Type</label>
-                        <select value={editType} onChange={(e) => setEditType(Number(e.target.value) as 1 | 2 | 3)} className="input">
+                        <select
+                          value={editType}
+                          onChange={(e) => {
+                            const nextType = Number(e.target.value) as ExerciseType;
+                            setEditType(nextType);
+                            if (nextType === 4) {
+                              setEditManual(true);
+                              setEditDistance(false);
+                              setMapSlot("");
+                            }
+                          }}
+                          className="input"
+                        >
                           <option value={1}>Strength</option>
                           <option value={2}>Cardio</option>
                           <option value={3}>Other</option>
+                          <option value={4}>Class</option>
                         </select>
                       </div>
 
                       <div className="flex gap-6">
                         <label className="flex items-center gap-2 cursor-pointer text-slate-300 text-sm">
-                          <input type="checkbox" checked={editManual} onChange={(e) => setEditManual(e.target.checked)} className="w-4 h-4 accent-blue-500" />
+                          <input
+                            type="checkbox"
+                            checked={editType === 4 ? true : editManual}
+                            onChange={(e) => setEditManual(e.target.checked)}
+                            disabled={editType === 4}
+                            className="w-4 h-4 accent-blue-500"
+                          />
                           Manual-only
                         </label>
                         <label className={`flex items-center gap-2 cursor-pointer text-sm ${editType === 2 ? "text-slate-300" : "text-slate-600"}`}>
@@ -495,7 +784,7 @@ export default function AdminExercisesPage() {
                       <div className="flex gap-2 flex-wrap items-end">
                         <div className="flex-1 min-w-[180px]">
                           <label className="label">Slot</label>
-                          <select value={mapSlot} onChange={(e) => setMapSlot(e.target.value)} className="input">
+                          <select value={mapSlot} onChange={(e) => setMapSlot(e.target.value)} disabled={editType === 4} className="input">
                             <option value="">Select slot…</option>
                             {slotCodes.map((s) => <option key={s} value={s}>{s}</option>)}
                           </select>
@@ -512,7 +801,7 @@ export default function AdminExercisesPage() {
                           />
                         </div>
 
-                        <button onClick={() => void mapSlotToSelected()} className="btn-secondary">
+                        <button onClick={() => void mapSlotToSelected()} disabled={editType === 4} className="btn-secondary">
                           Map
                         </button>
                       </div>
