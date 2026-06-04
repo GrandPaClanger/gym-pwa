@@ -1,8 +1,10 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { installAuthRecovery, localSignOut } from "@/lib/authRecovery";
 import {
   createExerciseGroup,
   deleteExerciseGroup as deleteExerciseGroupFromDb,
@@ -31,6 +33,8 @@ function parseNumberOrBlank(v: string): number | "" {
 }
 
 export default function AdminExercisesPage() {
+  const router = useRouter();
+
   const [isAuthed, setIsAuthed] = useState(false);
   const [authReady, setAuthReady] = useState(false); // don't render until session check done
   const [isAdmin, setIsAdmin] = useState(false);
@@ -181,6 +185,13 @@ export default function AdminExercisesPage() {
   };
 
   useEffect(() => {
+    const removeAuthRecovery = installAuthRecovery(() => {
+      setIsAuthed(false);
+      setUserId("");
+      setGroups([]);
+      setSelectedGroupId("");
+    });
+
     (async () => {
       const { data } = await supabase.auth.getSession();
       setIsAuthed(!!data.session);
@@ -188,17 +199,20 @@ export default function AdminExercisesPage() {
       if (data.session?.user.id) await loadGroupsFromDb();
       setAuthReady(true);
     })();
-    const { data: sub } = supabase.auth.onAuthStateChange(async (_evt, session) => {
+    const { data: sub } = supabase.auth.onAuthStateChange((_evt, session) => {
       setIsAuthed(!!session);
       setUserId(session?.user.id ?? "");
-      if (session?.user.id) await loadGroupsFromDb();
+      if (session?.user.id) void loadGroupsFromDb();
       else {
         setGroups([]);
         setSelectedGroupId("");
       }
       setAuthReady(true);
     });
-    return () => sub.subscription.unsubscribe();
+    return () => {
+      removeAuthRecovery();
+      sub.subscription.unsubscribe();
+    };
   }, []);
 
   useEffect(() => {
@@ -395,6 +409,16 @@ export default function AdminExercisesPage() {
     setMsg("Exercise group deleted.");
   };
 
+  const signOut = () => {
+    setIsAuthed(false);
+    setUserId("");
+    setGroups([]);
+    setSelectedGroupId("");
+    setMsg("");
+    void localSignOut();
+    router.replace("/log");
+  };
+
   const typeLabel = (t: ExerciseType) => ({ 1: "Strength", 2: "Cardio", 3: "Other", 4: "Class" }[t] ?? "—");
   const typeBadgeClass = (t: ExerciseType) => ({ 1: "badge-blue", 2: "badge-green", 3: "badge-slate", 4: "badge-purple" }[t] ?? "badge-slate");
 
@@ -434,7 +458,10 @@ export default function AdminExercisesPage() {
             <p className="section-title">Admin</p>
             <h1 className="text-lg font-bold text-slate-100 mt-0.5 sm:text-2xl">Exercise Maintenance</h1>
           </div>
-          <Link href="/" className="btn-ghost">← Today&apos;s Plan</Link>
+          <div className="flex gap-2">
+            <Link href="/" className="btn-ghost">← Today&apos;s Plan</Link>
+            <button onClick={signOut} className="btn-ghost">Sign out</button>
+          </div>
         </div>
 
         {/* Status */}

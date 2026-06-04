@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { installAuthRecovery, localSignOut } from "@/lib/authRecovery";
 import { ExerciseGroup, readExerciseGroups } from "@/lib/exerciseGroups";
 
 type TodayRow = {
@@ -302,32 +303,51 @@ export default function HomePage() {
     setMsg("");
   };
 
-  const signOut = async () => {
-    await supabase.auth.signOut();
+  const signOut = () => {
     setIsAdmin(false);
+    setIsAuthed(false);
     setRows([]);
     setMsg("");
+    void localSignOut();
     router.push("/log");
   };
 
   useEffect(() => {
+    let mounted = true;
     const stuckTimer = setTimeout(() => setLoadingStuck(true), 6000);
+    const removeAuthRecovery = installAuthRecovery(() => {
+      if (!mounted) return;
+      setIsAuthed(false);
+      setIsAdmin(false);
+      setRows([]);
+      router.replace("/log");
+    });
 
     (async () => {
-      const { data } = await supabase.auth.getSession();
-      const ok = !!data.session;
-      setIsAuthed(ok);
-      if (!ok) {
-        clearTimeout(stuckTimer);
-        setLoading(false);
+      try {
+        const { data } = await supabase.auth.getSession();
+        const ok = !!data.session;
+        if (!mounted) return;
+        setIsAuthed(ok);
+        if (!ok) {
+          clearTimeout(stuckTimer);
+          setLoading(false);
+          router.replace("/log");
+          return;
+        }
+        await Promise.all([checkIsAdmin(), loadToday()]);
+      } catch (error) {
+        console.error("Initial auth/load failed", error);
+        if (!mounted) return;
+        setIsAuthed(false);
+        setMsg("Connection timed out. Please sign in again.");
         router.replace("/log");
-        return;
+      } finally {
+        clearTimeout(stuckTimer);
       }
-      await Promise.all([checkIsAdmin(), loadToday()]);
-      clearTimeout(stuckTimer);
     })();
 
-    const { data: sub } = supabase.auth.onAuthStateChange(async (_evt, session) => {
+    const { data: sub } = supabase.auth.onAuthStateChange((_evt, session) => {
       const ok = !!session;
       setIsAuthed(ok);
       if (!ok) {
@@ -337,11 +357,16 @@ export default function HomePage() {
         router.replace("/log");
         return;
       }
-      await Promise.all([checkIsAdmin(), loadToday()]);
+      void Promise.all([checkIsAdmin(), loadToday()]).catch((error) => {
+        console.error("Auth state reload failed", error);
+        setMsg("Connection timed out. Please refresh or sign in again.");
+      });
     });
 
     return () => {
+      mounted = false;
       clearTimeout(stuckTimer);
+      removeAuthRecovery();
       sub.subscription.unsubscribe();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

@@ -1,8 +1,10 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { installAuthRecovery, localSignOut } from "@/lib/authRecovery";
 import { ExerciseGroup, readExerciseGroups } from "@/lib/exerciseGroups";
 
 type Mode = "plan" | "adhoc";
@@ -101,6 +103,8 @@ const clampReps = (v: number) => Math.max(REP_MIN, Math.min(REP_MAX, Math.round(
 const isValidReps = (v: number) => Number.isFinite(v) && v >= REP_MIN && v <= REP_MAX;
 
 export default function LogPage() {
+  const router = useRouter();
+
   const [mode, setMode] = useState<Mode>("plan");
 
   const [email, setEmail] = useState("");
@@ -139,6 +143,7 @@ export default function LogPage() {
 
   // per-exercise quick notes (one per exercise_id, shown every time)
   const [exerciseNotes, setExerciseNotes] = useState<Record<number, string>>({});
+  const [activeNoteExerciseId, setActiveNoteExerciseId] = useState<number | null>(null);
   const noteTimers = useRef<Record<number, ReturnType<typeof setTimeout> | null>>({});
   const [exNoteMsg, setExNoteMsg] = useState("");
 
@@ -183,6 +188,16 @@ export default function LogPage() {
     });
 
     setMsg(error ? error.message : "Check your email for the magic link.");
+  };
+
+  const signOut = () => {
+    setIsAuthed(false);
+    setRows([]);
+    setGroups([]);
+    setAddGroupId("");
+    setMsg("");
+    void localSignOut();
+    router.replace("/log");
   };
 
   const sessionKeyForToday = () => `gym.session_start.${todayIso()}`;
@@ -851,6 +866,13 @@ export default function LogPage() {
   // Auth init (hardened)
   useEffect(() => {
     let mounted = true;
+    const removeAuthRecovery = installAuthRecovery(() => {
+      if (!mounted) return;
+      setIsAuthed(false);
+      setRows([]);
+      setGroups([]);
+      setAddGroupId("");
+    });
 
     const safeEnsureSessionStart = () => {
       try {
@@ -882,11 +904,16 @@ export default function LogPage() {
       }
     })();
 
-    const { data: sub } = supabase.auth.onAuthStateChange(async (_evt, session) => {
+    const { data: sub } = supabase.auth.onAuthStateChange((_evt, session) => {
       if (!mounted) return;
 
       setIsAuthed(!!session);
-      if (session?.user.id) await loadGroupsFromDb();
+      if (session?.user.id) {
+        void loadGroupsFromDb().catch((error) => {
+          console.error("Auth state group load failed", error);
+          setMsg("Connection timed out. Please refresh or sign in again.");
+        });
+      }
       else {
         setGroups([]);
         setAddGroupId("");
@@ -904,6 +931,7 @@ export default function LogPage() {
 
     return () => {
       mounted = false;
+      removeAuthRecovery();
       clearTimeout(t);
       sub.subscription.unsubscribe();
     };
@@ -913,11 +941,16 @@ export default function LogPage() {
   useEffect(() => {
     if (!isAuthed) return;
     (async () => {
-      const freshList = await loadExerciseList();
-      await loadTodayPlanRows(freshList);
-      const ss = ensureSessionStart();
-      await loadNotesFromDb(ss);
-      await loadExerciseNotes();
+      try {
+        const freshList = await loadExerciseList();
+        await loadTodayPlanRows(freshList);
+        const ss = ensureSessionStart();
+        await loadNotesFromDb(ss);
+        await loadExerciseNotes();
+      } catch (error) {
+        console.error("Log page load failed", error);
+        setMsg("Connection timed out. Please refresh or sign in again.");
+      }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAuthed]);
@@ -1057,6 +1090,9 @@ export default function LogPage() {
           </button>
           <button onClick={newSession} className="btn-ghost">
             New session
+          </button>
+          <button onClick={signOut} className="btn-ghost">
+            Sign out
           </button>
 
           <div className="flex items-center gap-2 ml-auto">
@@ -1205,7 +1241,7 @@ export default function LogPage() {
 
                 {/* Quick exercise note */}
                 {exId != null && (
-                  <details open={!!exNoteVal} className="rounded-lg border border-slate-700 bg-slate-900/30 p-2">
+                  <details open={!!exNoteVal || activeNoteExerciseId === exId} className="rounded-lg border border-slate-700 bg-slate-900/30 p-2">
                     <summary className="cursor-pointer text-xs font-medium uppercase tracking-wide text-slate-400">
                       Quick note
                     </summary>
@@ -1213,6 +1249,8 @@ export default function LogPage() {
                       type="text"
                       value={exNoteVal}
                       maxLength={30}
+                      onFocus={() => setActiveNoteExerciseId(exId)}
+                      onBlur={() => setActiveNoteExerciseId((current) => (current === exId ? null : current))}
                       onChange={(e) => {
                         const v = e.target.value.slice(0, 30);
                         setExerciseNotes((prev) => ({ ...prev, [exId]: v }));
