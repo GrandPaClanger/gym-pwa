@@ -39,7 +39,18 @@ type PlanInsertRow = {
   target_duration_sec: number | null;
 };
 
+type WorkoutPlanRow = {
+  plan_id: number | string;
+  plan_date: string;
+};
+
+type WorkoutPlanItemRow = {
+  plan_id: number | string;
+  exercise_id: number | string;
+};
+
 const todayIso = () => new Date().toISOString().slice(0, 10);
+const DAY_SEQUENCE: DayType[] = ["Push", "Pull", "Legs"];
 const WORKING_SESSION_LIMIT_MIN = 75;
 const CARDIO_MIN = 30;
 const STRENGTH_EXERCISE_MIN = 5;
@@ -84,6 +95,21 @@ function findGroup(groups: ExerciseGroup[], names: string | string[]) {
   );
 }
 
+function nextDayType(day: DayType): DayType {
+  return DAY_SEQUENCE[(DAY_SEQUENCE.indexOf(day) + 1) % DAY_SEQUENCE.length];
+}
+
+function splitDayFromExerciseIds(exerciseIds: number[], groups: ExerciseGroup[]): DayType | null {
+  const exerciseIdSet = new Set(exerciseIds);
+  const counts = DAY_SEQUENCE.map((day) => {
+    const group = findGroup(groups, day);
+    const count = group?.exerciseIds.filter((exerciseId) => exerciseIdSet.has(exerciseId)).length ?? 0;
+    return { day, count };
+  }).sort((a, b) => b.count - a.count);
+
+  return counts[0]?.count > 0 ? counts[0].day : null;
+}
+
 function shuffled<T>(items: T[]) {
   const copy = [...items];
   for (let i = copy.length - 1; i > 0; i -= 1) {
@@ -103,6 +129,8 @@ export default function HomePage() {
   const [loadingStuck, setLoadingStuck] = useState(false);
   const [rows, setRows] = useState<TodayRow[]>([]);
   const [dayType, setDayType] = useState<DayType>("Push");
+  const [suggestedDayType, setSuggestedDayType] = useState<DayType | null>(null);
+  const [lastSplitDayType, setLastSplitDayType] = useState<DayType | null>(null);
 
   const checkIsAdmin = async () => {
     const { data, error } = await supabase.rpc("is_admin_user");
@@ -203,6 +231,64 @@ export default function HomePage() {
       exercise_type: Number(exercise.exercise_type),
       is_active: !!exercise.is_active,
     }));
+  };
+
+  const loadSuggestedDayType = async () => {
+    const [{ data: personData, error: personError }, groupResult] = await Promise.all([
+      supabase.rpc("my_person_id"),
+      readExerciseGroups(supabase),
+    ]);
+
+    if (personError || groupResult.error) return;
+
+    const personId = Number(personData);
+    if (!Number.isFinite(personId)) return;
+
+    const { data: plans, error: planError } = await supabase
+      .from("workout_plan")
+      .select("plan_id, plan_date")
+      .eq("person_id", personId)
+      .lte("plan_date", todayIso())
+      .order("plan_date", { ascending: false })
+      .order("plan_id", { ascending: false })
+      .limit(12);
+
+    if (planError) return;
+
+    const planRows = ((plans as WorkoutPlanRow[]) ?? []).map((plan) => ({
+      plan_id: Number(plan.plan_id),
+      plan_date: String(plan.plan_date),
+    })).filter((plan) => Number.isFinite(plan.plan_id));
+
+    if (planRows.length === 0) return;
+
+    const { data: items, error: itemError } = await supabase
+      .from("workout_plan_item")
+      .select("plan_id, exercise_id")
+      .in("plan_id", planRows.map((plan) => plan.plan_id));
+
+    if (itemError) return;
+
+    const itemsByPlanId = new Map<number, number[]>();
+    for (const item of (items as WorkoutPlanItemRow[]) ?? []) {
+      const planId = Number(item.plan_id);
+      const exerciseId = Number(item.exercise_id);
+      if (!Number.isFinite(planId) || !Number.isFinite(exerciseId)) continue;
+      const planItems = itemsByPlanId.get(planId) ?? [];
+      planItems.push(exerciseId);
+      itemsByPlanId.set(planId, planItems);
+    }
+
+    for (const plan of planRows) {
+      const lastSplit = splitDayFromExerciseIds(itemsByPlanId.get(plan.plan_id) ?? [], groupResult.groups);
+      if (!lastSplit) continue;
+
+      const suggested = nextDayType(lastSplit);
+      setLastSplitDayType(lastSplit);
+      setSuggestedDayType(suggested);
+      setDayType(suggested);
+      return;
+    }
   };
 
   const generateRegenerate = async () => {
@@ -335,7 +421,7 @@ export default function HomePage() {
           router.replace("/log");
           return;
         }
-        await Promise.all([checkIsAdmin(), loadToday()]);
+        await Promise.all([checkIsAdmin(), loadToday(), loadSuggestedDayType()]);
       } catch (error) {
         console.error("Initial auth/load failed", error);
         if (!mounted) return;
@@ -357,7 +443,7 @@ export default function HomePage() {
         router.replace("/log");
         return;
       }
-      void Promise.all([checkIsAdmin(), loadToday()]).catch((error) => {
+      void Promise.all([checkIsAdmin(), loadToday(), loadSuggestedDayType()]).catch((error) => {
         console.error("Auth state reload failed", error);
         setMsg("Connection timed out. Please refresh or sign in again.");
       });
@@ -409,18 +495,27 @@ export default function HomePage() {
 
         <div className="card space-y-3">
           <div className="grid grid-cols-3 gap-2">
-            {(["Push", "Pull", "Legs"] as DayType[]).map((option) => (
+            {DAY_SEQUENCE.map((option) => (
               <button
                 key={option}
                 type="button"
                 onClick={() => setDayType(option)}
-                className={option === dayType ? "btn-primary" : "btn-secondary"}
+                className={[
+                  option === dayType ? "btn-primary" : "btn-secondary",
+                  option === suggestedDayType ? "ring-2 ring-emerald-400 ring-offset-2 ring-offset-slate-900" : "",
+                ].filter(Boolean).join(" ")}
                 disabled={!isAuthed}
+                title={option === suggestedDayType ? "Suggested next split" : undefined}
               >
                 {option}
               </button>
             ))}
           </div>
+          {suggestedDayType && lastSplitDayType && (
+            <p className="text-xs text-emerald-300">
+              Suggested next: {suggestedDayType} after your last {lastSplitDayType} day.
+            </p>
+          )}
           <div className="flex gap-1.5 flex-wrap items-center sm:gap-2">
             {isAuthed && (
               <>
