@@ -62,6 +62,11 @@ type PlanItemPatch = {
   notes?: string | null;
 };
 
+type ActiveExerciseEdit = {
+  key: string;
+  label: string;
+} | null;
+
 const REP_MIN = 8;
 const REP_MAX = 20;
 
@@ -77,6 +82,8 @@ const typeLabel = (exerciseType: number) => (isClassType(exerciseType) ? "Class"
 const typeBadgeClass = (exerciseType: number) => (isClassType(exerciseType) ? "badge-purple" : isCardioType(exerciseType) ? "badge-green" : "badge-blue");
 const targetSetsFor = (exerciseType: number) => (isStrengthType(exerciseType) ? 3 : 1);
 const targetRepsFor = (exerciseType: number) => (isStrengthType(exerciseType) ? 10 : 1);
+const isCoreGroup = (group: ExerciseGroup) => normName(group.name) === "core";
+const isPilatesClass = (exercise: Exercise) => isClassType(exercise.exercise_type) && normName(exercise.canonical_name) === "pilates";
 
 function parseNumberOrBlank(v: string): number | "" {
   if (v === "") return "";
@@ -128,6 +135,7 @@ export default function LogPage() {
   const notesSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const autosaveTimers = useRef<Record<string, ReturnType<typeof setTimeout> | null>>({});
+  const pendingAutosaves = useRef<Record<string, { sequence_no: number; patch: PlanItemPatch } | null>>({});
 
   const [sets, setSets] = useState<Record<string, number | "">>({});
   const [reps, setReps] = useState<Record<string, number | "">>({});
@@ -146,6 +154,8 @@ export default function LogPage() {
   const [activeNoteExerciseId, setActiveNoteExerciseId] = useState<number | null>(null);
   const noteTimers = useRef<Record<number, ReturnType<typeof setTimeout> | null>>({});
   const [exNoteMsg, setExNoteMsg] = useState("");
+  const [activeExerciseEdit, setActiveExerciseEdit] = useState<ActiveExerciseEdit>(null);
+  const [keyboardInset, setKeyboardInset] = useState(0);
 
   // max load stats: exercise_id -> { max_load_kg, times_at_max }
   const [maxLoadStats, setMaxLoadStats] = useState<Record<number, { max_load_kg: number; times_at_max: number }>>({});
@@ -342,6 +352,46 @@ export default function LogPage() {
     });
   };
 
+  const clearLocalEditsForRows = (rowsToClear: Row[]) => {
+    for (const row of rowsToClear) clearLocalEditsForKey(rowKey(todayIso(), row.sequence_no));
+  };
+
+  const coreRowsInCurrentSession = (sourceRows = rows) => {
+    const coreExerciseIds = new Set(groups.find(isCoreGroup)?.exerciseIds ?? []);
+    if (coreExerciseIds.size === 0) return [];
+
+    return sourceRows.filter((row) => row.exercise_id != null && coreExerciseIds.has(row.exercise_id));
+  };
+
+  const removeCoreRowsForPilates = async (sourceRows = rows): Promise<number | null> => {
+    const rowsToRemove = coreRowsInCurrentSession(sourceRows);
+    if (rowsToRemove.length === 0) return 0;
+
+    clearLocalEditsForRows(rowsToRemove);
+
+    if (mode === "adhoc") {
+      const removeSeqs = new Set(rowsToRemove.map((row) => row.sequence_no));
+      setRows((prev) => prev.filter((row) => !removeSeqs.has(row.sequence_no)));
+      return rowsToRemove.length;
+    }
+
+    const pid = await requirePlanId();
+    if (!pid) return null;
+
+    const { error } = await supabase
+      .from("workout_plan_item")
+      .delete()
+      .eq("plan_id", pid)
+      .in("sequence_no", rowsToRemove.map((row) => row.sequence_no));
+
+    if (error) {
+      setMsg(error.message);
+      return null;
+    }
+
+    return rowsToRemove.length;
+  };
+
   const loadTodayPlanRows = async (freshList?: Exercise[]) => {
     setMsg("");
     const planDate = todayIso();
@@ -432,28 +482,71 @@ export default function LogPage() {
     setMsg("Plan reloaded.");
   };
 
+  const flushAutosave = async (k: string, showStatus = false): Promise<boolean> => {
+    if (autosaveTimers.current[k]) {
+      clearTimeout(autosaveTimers.current[k]!);
+      autosaveTimers.current[k] = null;
+    }
+
+    const pending = pendingAutosaves.current[k];
+    if (!pending) {
+      if (showStatus) setMsg("Change applied.");
+      return true;
+    }
+
+    pendingAutosaves.current[k] = null;
+
+    const pid = await requirePlanId();
+    if (!pid) {
+      setMsg("No plan loaded. Click Refresh plan.");
+      return false;
+    }
+
+    const { error } = await supabase
+      .from("workout_plan_item")
+      .update(pending.patch)
+      .eq("plan_id", pid)
+      .eq("sequence_no", pending.sequence_no);
+
+    if (error) {
+      setMsg(error.message);
+      return false;
+    }
+
+    if (showStatus) setMsg("Change saved.");
+    return true;
+  };
+
   const queueAutosave = (sequence_no: number, patch: PlanItemPatch) => {
     if (mode !== "plan") return;
 
     const planDate = todayIso();
     const k = rowKey(planDate, sequence_no);
+    const previous = pendingAutosaves.current[k]?.patch ?? {};
+    pendingAutosaves.current[k] = { sequence_no, patch: { ...previous, ...patch } };
 
     if (autosaveTimers.current[k]) clearTimeout(autosaveTimers.current[k]!);
 
     autosaveTimers.current[k] = setTimeout(async () => {
-      autosaveTimers.current[k] = null;
-
-      const pid = await requirePlanId();
-      if (!pid) return setMsg("No plan loaded. Click Refresh plan.");
-
-      const { error } = await supabase
-        .from("workout_plan_item")
-        .update(patch)
-        .eq("plan_id", pid)
-        .eq("sequence_no", sequence_no);
-
-      if (error) setMsg(error.message);
+      await flushAutosave(k);
     }, 500);
+  };
+
+  const focusExerciseEdit = (k: string, label: string) => {
+    setActiveExerciseEdit({ key: k, label });
+  };
+
+  const blurExerciseEdit = (k: string) => {
+    setActiveExerciseEdit((current) => (current?.key === k ? null : current));
+  };
+
+  const confirmExerciseEdit = async () => {
+    const active = activeExerciseEdit;
+    if (!active) return;
+
+    await flushAutosave(active.key, true);
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+    setActiveExerciseEdit(null);
   };
 
   const addExercise = async () => {
@@ -495,8 +588,14 @@ export default function LogPage() {
         if (ex.is_distance_based) setCaloriesKcal((p) => ({ ...p, [k]: "" }));
       }
 
+      const removedCoreCount = isPilatesClass(ex) ? await removeCoreRowsForPilates() : 0;
+
       setAddExerciseId("");
-      setMsg("Added (ad-hoc).");
+      setMsg(
+        removedCoreCount && removedCoreCount > 0
+          ? `Added Pilates and removed ${removedCoreCount} core ${removedCoreCount === 1 ? "exercise" : "exercises"}.`
+          : "Added (ad-hoc)."
+      );
       return;
     }
 
@@ -525,9 +624,16 @@ export default function LogPage() {
     const { error } = await supabase.from("workout_plan_item").insert(insertRow);
     if (error) return setMsg(error.message);
 
+    const removedCoreCount = isPilatesClass(ex) ? await removeCoreRowsForPilates() : 0;
+    if (removedCoreCount == null) return;
+
     setAddExerciseId("");
     await loadTodayPlanRows();
-    setMsg("Exercise added.");
+    setMsg(
+      removedCoreCount > 0
+        ? `Added Pilates and removed ${removedCoreCount} core ${removedCoreCount === 1 ? "exercise" : "exercises"}.`
+        : "Exercise added."
+    );
   };
 
   const addExerciseGroup = async () => {
@@ -594,9 +700,13 @@ export default function LogPage() {
         return next;
       });
 
+      const removedCoreCount = toAdd.some(isPilatesClass) ? await removeCoreRowsForPilates() : 0;
+
       const skipped = groupExercises.length - toAdd.length;
       setMsg(
-        skipped > 0
+        removedCoreCount && removedCoreCount > 0
+          ? `Added ${toAdd.length} from "${group.name}" and removed ${removedCoreCount} core ${removedCoreCount === 1 ? "exercise" : "exercises"}.`
+          : skipped > 0
           ? `Added ${toAdd.length} from "${group.name}" (${skipped} already present).`
           : `Added ${toAdd.length} from "${group.name}".`
       );
@@ -619,10 +729,15 @@ export default function LogPage() {
     const { error } = await supabase.from("workout_plan_item").insert(insertRows);
     if (error) return setMsg(error.message);
 
+    const removedCoreCount = toAdd.some(isPilatesClass) ? await removeCoreRowsForPilates() : 0;
+    if (removedCoreCount == null) return;
+
     await loadTodayPlanRows();
     const skipped = groupExercises.length - toAdd.length;
     setMsg(
-      skipped > 0
+      removedCoreCount > 0
+        ? `Added ${toAdd.length} from "${group.name}" and removed ${removedCoreCount} core ${removedCoreCount === 1 ? "exercise" : "exercises"}.`
+        : skipped > 0
         ? `Added ${toAdd.length} from "${group.name}" (${skipped} already present).`
         : `Added ${toAdd.length} from "${group.name}".`
     );
@@ -936,6 +1051,25 @@ export default function LogPage() {
       sub.subscription.unsubscribe();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    const viewport = window.visualViewport;
+    if (!viewport) return;
+
+    const updateKeyboardInset = () => {
+      const inset = Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop);
+      setKeyboardInset(inset);
+    };
+
+    updateKeyboardInset();
+    viewport.addEventListener("resize", updateKeyboardInset);
+    viewport.addEventListener("scroll", updateKeyboardInset);
+
+    return () => {
+      viewport.removeEventListener("resize", updateKeyboardInset);
+      viewport.removeEventListener("scroll", updateKeyboardInset);
+    };
   }, []);
 
   useEffect(() => {
@@ -1270,7 +1404,10 @@ export default function LogPage() {
                       <input
                         type="text"
                         inputMode="numeric"
+                        enterKeyHint="done"
                         value={showReps === "" ? "" : String(showReps)}
+                        onFocus={() => focusExerciseEdit(k, `${r.exercise_name} reps`)}
+                        onBlur={() => blurExerciseEdit(k)}
                         onChange={(e) => {
                           const raw = parseNumberOrBlank(e.target.value);
                           setReps((prev) => ({ ...prev, [k]: raw }));
@@ -1284,7 +1421,10 @@ export default function LogPage() {
                       <input
                         type="text"
                         inputMode="decimal"
+                        enterKeyHint="done"
                         value={showLoad}
+                        onFocus={() => focusExerciseEdit(k, `${r.exercise_name} load`)}
+                        onBlur={() => blurExerciseEdit(k)}
                         onChange={(e) => {
                           const raw = e.target.value;
                           setLoads((prev) => ({ ...prev, [k]: raw }));
@@ -1298,7 +1438,10 @@ export default function LogPage() {
                       <input
                         type="text"
                         inputMode="numeric"
+                        enterKeyHint="done"
                         value={showSets === "" ? "" : String(showSets)}
+                        onFocus={() => focusExerciseEdit(k, `${r.exercise_name} sets`)}
+                        onBlur={() => blurExerciseEdit(k)}
                         onChange={(e) => {
                           const v = parseNumberOrBlank(e.target.value);
                           setSets((prev) => ({ ...prev, [k]: v }));
@@ -1322,7 +1465,10 @@ export default function LogPage() {
                       <input
                         type="text"
                         inputMode="numeric"
+                        enterKeyHint="done"
                         value={showMin === "" ? "" : String(showMin)}
+                        onFocus={() => focusExerciseEdit(k, `${r.exercise_name} duration`)}
+                        onBlur={() => blurExerciseEdit(k)}
                         onChange={(e) => {
                           const v = parseNumberOrBlank(e.target.value);
                           setDurationsMin((prev) => ({ ...prev, [k]: v }));
@@ -1338,7 +1484,10 @@ export default function LogPage() {
                         <input
                           type="text"
                           inputMode="numeric"
+                          enterKeyHint="done"
                           value={showCalories === "" ? "" : String(showCalories)}
+                          onFocus={() => focusExerciseEdit(k, `${r.exercise_name} calories`)}
+                          onBlur={() => blurExerciseEdit(k)}
                           onChange={(e) => {
                             const v = parseNumberOrBlank(e.target.value);
                             setCaloriesKcal((prev) => ({ ...prev, [k]: v }));
@@ -1409,6 +1558,29 @@ export default function LogPage() {
           />
         </div>
       </div>
+
+      {activeExerciseEdit && (
+        <div
+          className="fixed left-0 right-0 z-40 px-3"
+          style={{ bottom: `${Math.max(keyboardInset + 8, 76)}px` }}
+        >
+          <div className="mx-auto flex max-w-2xl items-center justify-between gap-3 rounded-lg border border-emerald-400/60 bg-slate-950/95 px-3 py-2 shadow-xl backdrop-blur-sm">
+            <span className="min-w-0 truncate text-sm font-medium text-slate-100">
+              Editing {activeExerciseEdit.label}
+            </span>
+            <button
+              type="button"
+              onPointerDown={(e) => e.preventDefault()}
+              onClick={() => void confirmExerciseEdit()}
+              className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-emerald-500 text-xl font-bold leading-none text-slate-950 shadow-lg shadow-emerald-950/40 focus:outline-none focus:ring-2 focus:ring-emerald-300"
+              aria-label="Apply change"
+              title="Apply change"
+            >
+              ✓
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Sticky save footer */}
       <div className="fixed bottom-0 left-0 right-0 border-t border-slate-700 bg-slate-900/95 backdrop-blur-sm px-3 py-2 sm:px-4 sm:py-3">

@@ -6,8 +6,6 @@ import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { installAuthRecovery, localSignOut } from "@/lib/authRecovery";
 import {
-  createExerciseGroup,
-  deleteExerciseGroup as deleteExerciseGroupFromDb,
   ExerciseGroup,
   readExerciseGroups,
   updateExerciseGroup,
@@ -23,8 +21,13 @@ type Exercise = {
 };
 
 type ExerciseType = 1 | 2 | 3 | 4;
+type ExerciseCategory = "Cardio" | "Push" | "Pull" | "Legs" | "Core" | "Class";
+
+const EXERCISE_CATEGORIES: ExerciseCategory[] = ["Cardio", "Push", "Pull", "Legs", "Core", "Class"];
 
 const norm = (s: string) => (s ?? "").trim().toLowerCase();
+const categoryType = (category: ExerciseCategory): ExerciseType =>
+  category === "Cardio" ? 2 : category === "Class" ? 4 : 1;
 
 function parseNumberOrBlank(v: string): number | "" {
   if (v === "") return "";
@@ -50,12 +53,9 @@ export default function AdminExercisesPage() {
 
   // Create
   const [newName, setNewName] = useState("");
-  const [newType, setNewType] = useState<ExerciseType>(1);
-  const [newManual, setNewManual] = useState(false);
+  const [newCategory, setNewCategory] = useState<ExerciseCategory>("Pull");
   const [newDistance, setNewDistance] = useState(false);
   const [newActive, setNewActive] = useState(true);
-  const [newSlot, setNewSlot] = useState("");
-  const [newBaseWeight, setNewBaseWeight] = useState<number | "">(1);
 
   // Edit
   const selected = useMemo(
@@ -75,7 +75,6 @@ export default function AdminExercisesPage() {
   // Exercise groups
   const [groups, setGroups] = useState<ExerciseGroup[]>([]);
   const [groupSearch, setGroupSearch] = useState("");
-  const [groupName, setGroupName] = useState("");
   const [groupExerciseIds, setGroupExerciseIds] = useState<number[]>([]);
   const [selectedGroupId, setSelectedGroupId] = useState("");
   const [groupPickerOpen, setGroupPickerOpen] = useState(false);
@@ -115,11 +114,14 @@ export default function AdminExercisesPage() {
       setSelectedGroupId("");
       return;
     }
-    setGroups(stored);
+    const standardGroups = EXERCISE_CATEGORIES
+      .map((category) => stored.find((group) => norm(group.name) === norm(category)))
+      .filter((group): group is ExerciseGroup => !!group);
+    setGroups(standardGroups);
     setSelectedGroupId((current) =>
-      current && stored.some((g) => g.id === current)
+      current && standardGroups.some((g) => g.id === current)
         ? current
-        : stored[0]?.id ?? ""
+        : standardGroups[0]?.id ?? ""
     );
   };
 
@@ -175,10 +177,11 @@ export default function AdminExercisesPage() {
       .from("exercise_slot")
       .select("slot_code")
       .order("slot_code", { ascending: true });
-    const codes = slotRes.error ? [] : (slotRes.data ?? []).map((r: { slot_code: string }) => String(r.slot_code));
+    const codes = slotRes.error
+      ? []
+      : Array.from(new Set((slotRes.data ?? []).map((r: { slot_code: string }) => String(r.slot_code))));
     setSlotCodes(codes);
 
-    if (!newSlot && codes.length) setNewSlot(codes[0]);
     if (!mapSlot && codes.length) setMapSlot(codes[0]);
 
     setLoading(false);
@@ -256,13 +259,14 @@ export default function AdminExercisesPage() {
     const name = newName.trim();
     if (!name) return setMsg("Enter a name.");
 
-    const isClass = newType === 4;
-    const dist = newType === 2 ? newDistance : false;
+    const type = categoryType(newCategory);
+    const isClass = newCategory === "Class";
+    const dist = newCategory === "Cardio" ? newDistance : false;
 
     const res = await supabase.rpc("admin_create_exercise", {
       p_canonical_name: name,
-      p_exercise_type: newType,
-      p_is_manual_only: isClass ? true : newManual,
+      p_exercise_type: type,
+      p_is_manual_only: isClass,
       p_is_distance_based: dist,
       p_is_active: newActive,
     });
@@ -272,33 +276,31 @@ export default function AdminExercisesPage() {
     const newId = Number(res.data);
     if (!Number.isFinite(newId)) return setMsg("Create failed: invalid return.");
 
-    if (!isClass && newSlot.trim()) {
-      const bw = newBaseWeight === "" ? 1 : Number(newBaseWeight);
-      const baseWeight = Number.isFinite(bw) ? bw : 1;
+    const targetGroup = groups.find((group) => norm(group.name) === norm(newCategory));
+    if (!targetGroup) {
+      await loadAll();
+      return setMsg(`Exercise created, but the ${newCategory} category could not be found.`);
+    }
 
-      const mapRes = await supabase.rpc("admin_map_exercise_slot", {
-        p_exercise_id: newId,
-        p_slot_code: newSlot.trim(),
-        p_base_weight: baseWeight,
-      });
-
-      if (mapRes.error) {
-        await loadAll();
-        return setMsg(`Created (id=${newId}) but mapping failed: ${mapRes.error.message}`);
-      }
+    const groupUpdate = await updateExerciseGroup(
+      supabase,
+      targetGroup.id,
+      targetGroup.name,
+      [...targetGroup.exerciseIds, newId]
+    );
+    if (groupUpdate.error) {
+      await loadAll();
+      return setMsg(`Exercise created, but adding it to ${newCategory} failed: ${groupUpdate.error}`);
     }
 
     setNewName("");
-    setNewType(1);
-    setNewManual(false);
+    setNewCategory("Pull");
     setNewDistance(false);
     setNewActive(true);
-    setNewSlot("");
-    setNewBaseWeight(1);
 
-    await loadAll();
+    await Promise.all([loadAll(), loadGroupsFromDb()]);
     setSelectedId(newId);
-    setMsg("Exercise created.");
+    setMsg(`Exercise created in ${newCategory}.`);
   };
 
   const saveEdits = async () => {
@@ -345,19 +347,9 @@ export default function AdminExercisesPage() {
     setMsg("Mapped.");
   };
 
-  const startNewGroup = () => {
-    setSelectedGroupId("");
-    setGroupName("");
-    setGroupExerciseIds([]);
-    setGroupSearch("");
-    setGroupPickerOpen(true);
-    setMsg("New group ready. Name it, choose exercises, then press Create Group.");
-  };
-
   const loadGroupIntoForm = (groupId: string) => {
     const group = groups.find((g) => g.id === groupId);
     setSelectedGroupId(groupId);
-    setGroupName(group?.name ?? "");
     setGroupExerciseIds(group?.exerciseIds ?? []);
     setGroupSearch("");
     setGroupPickerOpen(true);
@@ -376,37 +368,17 @@ export default function AdminExercisesPage() {
     setMsg("");
     if (!userId) return setMsg("Sign in before saving groups.");
 
-    const name = groupName.trim();
+    const name = selectedGroup?.name ?? "";
     const exerciseIds = Array.from(new Set(groupExerciseIds));
-    if (!name) return setMsg("Group name is required.");
+    if (!selectedGroupId || !name) return setMsg("Select a category.");
     if (exerciseIds.length === 0) return setMsg("Choose at least one exercise for the group.");
 
-    if (selectedGroupId) {
-      const { error } = await updateExerciseGroup(supabase, selectedGroupId, name, exerciseIds);
-      if (error) return setMsg(error);
-      await loadGroupsFromDb();
-      setSelectedGroupId(selectedGroupId);
-      setGroupPickerOpen(false);
-      setMsg("Exercise group saved.");
-      return;
-    }
-
-    const { group, error } = await createExerciseGroup(supabase, name, exerciseIds);
-    if (error || !group) return setMsg(error ?? "Exercise group could not be created.");
-    await loadGroupsFromDb();
-    setSelectedGroupId(group.id);
-    setGroupPickerOpen(false);
-    setMsg("Exercise group created.");
-  };
-
-  const deleteExerciseGroup = async () => {
-    setMsg("");
-    if (!selectedGroupId) return setMsg("Select a group first.");
-    const { error } = await deleteExerciseGroupFromDb(supabase, selectedGroupId);
+    const { error } = await updateExerciseGroup(supabase, selectedGroupId, name, exerciseIds);
     if (error) return setMsg(error);
     await loadGroupsFromDb();
-    startNewGroup();
-    setMsg("Exercise group deleted.");
+    setSelectedGroupId(selectedGroupId);
+    setGroupPickerOpen(false);
+    setMsg(`${name} category saved.`);
   };
 
   const signOut = () => {
@@ -503,63 +475,29 @@ export default function AdminExercisesPage() {
                 </div>
 
                 <div>
-                  <label className="label">Type</label>
+                  <label className="label">Category</label>
                   <select
-                    value={newType}
+                    value={newCategory}
                     onChange={(e) => {
-                      const nextType = Number(e.target.value) as ExerciseType;
-                      setNewType(nextType);
-                      if (nextType === 4) {
-                        setNewManual(true);
-                        setNewDistance(false);
-                        setNewSlot("");
-                      }
+                      const category = e.target.value as ExerciseCategory;
+                      setNewCategory(category);
+                      if (category !== "Cardio") setNewDistance(false);
                     }}
                     className="input"
                   >
-                    <option value={1}>Strength</option>
-                    <option value={2}>Cardio</option>
-                    <option value={3}>Other</option>
-                    <option value={4}>Class</option>
+                    {EXERCISE_CATEGORIES.map((category) => (
+                      <option key={category} value={category}>{category}</option>
+                    ))}
                   </select>
-                </div>
-
-                <div>
-                  <label className="label">Slot mapping</label>
-                  <select value={newSlot} onChange={(e) => setNewSlot(e.target.value)} disabled={newType === 4} className="input">
-                    <option value="">(No slot mapping)</option>
-                    {slotCodes.map((s) => <option key={s} value={s}>{s}</option>)}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="label">Base weight</label>
-                  <input
-                    value={newBaseWeight === "" ? "" : String(newBaseWeight)}
-                    onChange={(e) => setNewBaseWeight(parseNumberOrBlank(e.target.value))}
-                    placeholder="1"
-                    inputMode="decimal"
-                    className="input"
-                  />
                 </div>
 
                 <div className="flex items-end gap-6 pb-1">
-                  <label className="flex items-center gap-2 cursor-pointer text-slate-300 text-sm">
-                    <input
-                      type="checkbox"
-                      checked={newType === 4 ? true : newManual}
-                      onChange={(e) => setNewManual(e.target.checked)}
-                      disabled={newType === 4}
-                      className="w-4 h-4 accent-blue-500"
-                    />
-                    Manual-only
-                  </label>
-                  <label className={`flex items-center gap-2 cursor-pointer text-sm ${newType === 2 ? "text-slate-300" : "text-slate-600"}`}>
+                  <label className={`flex items-center gap-2 cursor-pointer text-sm ${newCategory === "Cardio" ? "text-slate-300" : "text-slate-600"}`}>
                     <input
                       type="checkbox"
                       checked={newDistance}
                       onChange={(e) => setNewDistance(e.target.checked)}
-                      disabled={newType !== 2}
+                      disabled={newCategory !== "Cardio"}
                       className="w-4 h-4 accent-blue-500"
                     />
                     Distance-based
@@ -580,25 +518,22 @@ export default function AdminExercisesPage() {
             <div className="card space-y-4">
               <div className="flex items-center justify-between gap-3 flex-wrap">
                 <div>
-                  <p className="section-title">Exercise groups</p>
+                  <p className="section-title">Categories</p>
                   <h2 className="text-lg font-semibold text-slate-100 mt-0.5">
-                    Create and edit groups
+                    Manage category exercises
                   </h2>
                 </div>
-                <button onClick={startNewGroup} className="btn-secondary">
-                  New Group
-                </button>
               </div>
 
               <div className="space-y-3">
                 <div className="space-y-3">
                   <p className="text-sm text-slate-400">
-                    Saved groups ({groups.length})
+                    Categories ({groups.length})
                   </p>
                   <div className="space-y-1 max-h-64 overflow-y-auto">
                     {groups.length === 0 ? (
                       <div className="rounded-lg border border-slate-700 px-3 py-4 text-sm text-slate-500">
-                        No groups created yet.
+                        No standard categories found.
                       </div>
                     ) : (
                       groups.map((g) => (
@@ -620,16 +555,6 @@ export default function AdminExercisesPage() {
                 </div>
 
                 <div className="space-y-3">
-                  <div>
-                    <label className="label">Group name</label>
-                    <input
-                      value={groupName}
-                      onChange={(e) => setGroupName(e.target.value)}
-                      placeholder="e.g. Push day"
-                      className="input"
-                    />
-                  </div>
-
                   <details
                     open={groupPickerOpen}
                     onToggle={(e) => setGroupPickerOpen(e.currentTarget.open)}
@@ -681,16 +606,9 @@ export default function AdminExercisesPage() {
                     <span className="text-sm text-slate-500">
                       {groupExerciseIds.length} selected
                     </span>
-                    <div className="flex gap-2">
-                      {selectedGroupId && (
-                        <button onClick={deleteExerciseGroup} className="btn-danger">
-                          Delete
-                        </button>
-                      )}
-                      <button onClick={saveExerciseGroup} className="btn-primary">
-                        {selectedGroupId ? "Save Group" : "Create Group"}
-                      </button>
-                    </div>
+                    <button onClick={saveExerciseGroup} disabled={!selectedGroupId} className="btn-primary">
+                      Save Category
+                    </button>
                   </div>
                 </div>
               </div>
@@ -811,10 +729,12 @@ export default function AdminExercisesPage() {
                       </button>
                     </div>
 
-                    <div className="border-t border-slate-700 pt-5 space-y-3">
-                      <p className="section-title">Map to slot</p>
+                    <details className="border-t border-slate-700 pt-5">
+                      <summary className="cursor-pointer text-xs font-semibold uppercase tracking-widest text-slate-500">
+                        Advanced legacy slot mapping
+                      </summary>
 
-                      <div className="flex gap-2 flex-wrap items-end">
+                      <div className="mt-3 flex gap-2 flex-wrap items-end">
                         <div className="flex-1 min-w-[180px]">
                           <label className="label">Slot</label>
                           <select value={mapSlot} onChange={(e) => setMapSlot(e.target.value)} disabled={editType === 4} className="input">
@@ -838,7 +758,7 @@ export default function AdminExercisesPage() {
                           Map
                         </button>
                       </div>
-                    </div>
+                    </details>
                   </>
                 )}
               </div>
