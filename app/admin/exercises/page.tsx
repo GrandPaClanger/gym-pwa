@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { installAuthRecovery, localSignOut } from "@/lib/authRecovery";
 import {
@@ -28,6 +28,8 @@ const EXERCISE_CATEGORIES: ExerciseCategory[] = ["Cardio", "Push", "Pull", "Legs
 const norm = (s: string) => (s ?? "").trim().toLowerCase();
 const categoryType = (category: ExerciseCategory): ExerciseType =>
   category === "Cardio" ? 2 : category === "Class" ? 4 : 1;
+const typeCategory = (type: ExerciseType): ExerciseCategory =>
+  type === 2 ? "Cardio" : type === 4 ? "Class" : "Pull";
 
 function parseNumberOrBlank(v: string): number | "" {
   if (v === "") return "";
@@ -63,6 +65,7 @@ export default function AdminExercisesPage() {
     [items, selectedId]
   );
   const [editName, setEditName] = useState("");
+  const [editCategory, setEditCategory] = useState<ExerciseCategory>("Pull");
   const [editType, setEditType] = useState<ExerciseType>(1);
   const [editManual, setEditManual] = useState(false);
   const [editDistance, setEditDistance] = useState(false);
@@ -105,6 +108,14 @@ export default function AdminExercisesPage() {
     const byId = new Map(items.map((e) => [e.exercise_id, e.canonical_name]));
     return selectedGroup?.exerciseIds.map((id) => byId.get(id)).filter(Boolean) ?? [];
   }, [items, selectedGroup]);
+
+  const categoryForExercise = useCallback((exercise: Exercise): ExerciseCategory => {
+    const group = groups.find((g) => g.exerciseIds.includes(exercise.exercise_id));
+    if (group && EXERCISE_CATEGORIES.includes(group.name as ExerciseCategory)) {
+      return group.name as ExerciseCategory;
+    }
+    return typeCategory(exercise.exercise_type);
+  }, [groups]);
 
   const loadGroupsFromDb = async () => {
     const { groups: stored, error } = await readExerciseGroups(supabase);
@@ -226,10 +237,12 @@ export default function AdminExercisesPage() {
 
   useEffect(() => {
   if (!selected) return;
+  const category = categoryForExercise(selected);
   setEditName(selected.canonical_name);
-  setEditType(selected.exercise_type);
-  setEditManual(selected.is_manual_only);
-  setEditDistance(selected.is_distance_based);
+  setEditCategory(category);
+  setEditType(categoryType(category));
+  setEditManual(category === "Class" ? true : selected.is_manual_only);
+  setEditDistance(category === "Cardio" ? selected.is_distance_based : false);
   setEditActive(selected.is_active);
 
   // Fetch current slot mapping and pre-populate the dropdown
@@ -250,7 +263,7 @@ export default function AdminExercisesPage() {
       setMapBaseWeight(1);
     }
   })();
-}, [selected]);
+}, [selected, categoryForExercise]);
 
   const createExercise = async () => {
     setMsg("");
@@ -310,12 +323,13 @@ export default function AdminExercisesPage() {
     const name = editName.trim();
     if (!name) return setMsg("Name cannot be blank.");
 
-    const isClass = editType === 4;
-    const dist = editType === 2 ? editDistance : false;
+    const type = categoryType(editCategory);
+    const isClass = editCategory === "Class";
+    const dist = editCategory === "Cardio" ? editDistance : false;
 
     const res = await supabase.rpc("admin_update_exercise", {
       p_exercise_id: selected.exercise_id,
-      p_exercise_type: editType,
+      p_exercise_type: type,
       p_is_manual_only: isClass ? true : editManual,
       p_is_distance_based: dist,
       p_is_active: editActive,
@@ -323,7 +337,19 @@ export default function AdminExercisesPage() {
 
     if (res.error) return setMsg(res.error.message);
 
-    await loadAll();
+    for (const group of groups) {
+      const shouldInclude = norm(group.name) === norm(editCategory);
+      const hasExercise = group.exerciseIds.includes(selected.exercise_id);
+      if (shouldInclude === hasExercise) continue;
+
+      const exerciseIds = shouldInclude
+        ? [...group.exerciseIds, selected.exercise_id]
+        : group.exerciseIds.filter((id) => id !== selected.exercise_id);
+      const groupUpdate = await updateExerciseGroup(supabase, group.id, group.name, exerciseIds);
+      if (groupUpdate.error) return setMsg(groupUpdate.error);
+    }
+
+    await Promise.all([loadAll(), loadGroupsFromDb()]);
     setSelectedId(null);
     setMsg("Saved.");
   };
@@ -676,24 +702,25 @@ export default function AdminExercisesPage() {
                       </div>
 
                       <div>
-                        <label className="label">Type</label>
+                        <label className="label">Category</label>
                         <select
-                          value={editType}
+                          value={editCategory}
                           onChange={(e) => {
-                            const nextType = Number(e.target.value) as ExerciseType;
-                            setEditType(nextType);
-                            if (nextType === 4) {
+                            const category = e.target.value as ExerciseCategory;
+                            setEditCategory(category);
+                            setEditType(categoryType(category));
+                            if (category === "Class") {
                               setEditManual(true);
                               setEditDistance(false);
                               setMapSlot("");
                             }
+                            if (category !== "Cardio") setEditDistance(false);
                           }}
                           className="input"
                         >
-                          <option value={1}>Strength</option>
-                          <option value={2}>Cardio</option>
-                          <option value={3}>Other</option>
-                          <option value={4}>Class</option>
+                          {EXERCISE_CATEGORIES.map((category) => (
+                            <option key={category} value={category}>{category}</option>
+                          ))}
                         </select>
                       </div>
 
@@ -708,12 +735,12 @@ export default function AdminExercisesPage() {
                           />
                           Manual-only
                         </label>
-                        <label className={`flex items-center gap-2 cursor-pointer text-sm ${editType === 2 ? "text-slate-300" : "text-slate-600"}`}>
+                        <label className={`flex items-center gap-2 cursor-pointer text-sm ${editCategory === "Cardio" ? "text-slate-300" : "text-slate-600"}`}>
                           <input
                             type="checkbox"
                             checked={editDistance}
                             onChange={(e) => setEditDistance(e.target.checked)}
-                            disabled={editType !== 2}
+                            disabled={editCategory !== "Cardio"}
                             className="w-4 h-4 accent-blue-500"
                           />
                           Distance-based
