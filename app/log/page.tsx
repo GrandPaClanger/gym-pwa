@@ -72,7 +72,7 @@ const isCardioType = (exerciseType: number) => exerciseType === 2;
 const isClassType = (exerciseType: number) => exerciseType === 4;
 const isTimedType = (exerciseType: number) => isCardioType(exerciseType) || isClassType(exerciseType);
 const isStrengthType = (exerciseType: number) => !isTimedType(exerciseType);
-const defaultDurationMin = (exerciseType: number) => (isClassType(exerciseType) ? 60 : 8);
+const defaultDurationMin = (exerciseType: number) => (isClassType(exerciseType) ? 60 : 30);
 const typeLabel = (exerciseType: number) => (isClassType(exerciseType) ? "Class" : isCardioType(exerciseType) ? "Cardio" : "Strength");
 const typeBadgeClass = (exerciseType: number) => (isClassType(exerciseType) ? "badge-purple" : isCardioType(exerciseType) ? "badge-green" : "badge-blue");
 const targetSetsFor = (exerciseType: number) => (isStrengthType(exerciseType) ? 3 : 1);
@@ -491,7 +491,7 @@ export default function LogPage() {
         setReps((p) => ({ ...p, [k]: 10 }));
         setLoads((p) => ({ ...p, [k]: "" }));
       } else {
-        setDurationsMin((p) => ({ ...p, [k]: 8 }));
+        setDurationsMin((p) => ({ ...p, [k]: defaultDurationMin(ex.exercise_type) }));
         if (ex.is_distance_based) setCaloriesKcal((p) => ({ ...p, [k]: "" }));
       }
 
