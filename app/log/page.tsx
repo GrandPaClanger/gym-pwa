@@ -77,6 +77,8 @@ const REP_MIN = 8;
 const REP_MAX = 20;
 const LONG_PRESS_MS = 450;
 const DRAG_CANCEL_PX = 8;
+const DRAG_EDGE_SCROLL_PX = 96;
+const DRAG_EDGE_SCROLL_MAX_PX = 18;
 
 const todayIso = () => new Date().toISOString().slice(0, 10);
 const rowKey = (planDate: string, seq: number) => `${planDate}-${seq}`;
@@ -168,6 +170,8 @@ export default function LogPage() {
   const dragStateRef = useRef<DragState>(null);
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const dragPointer = useRef<{ id: number; sequenceNo: number; startX: number; startY: number } | null>(null);
+  const dragClientPoint = useRef<{ x: number; y: number } | null>(null);
+  const autoScrollFrame = useRef<number | null>(null);
 
   // max load stats: exercise_id -> { max_load_kg, times_at_max }
   const [maxLoadStats, setMaxLoadStats] = useState<Record<number, { max_load_kg: number; times_at_max: number }>>({});
@@ -688,6 +692,49 @@ export default function LogPage() {
     setDragState(resolved);
   };
 
+  const updateDragTargetAtPoint = (clientX: number, clientY: number) => {
+    const overSequenceNo = findSequenceAtPoint(clientX, clientY);
+    if (overSequenceNo == null) return;
+
+    updateDragState((current) =>
+      current && current.overSequenceNo !== overSequenceNo
+        ? { ...current, overSequenceNo }
+        : current
+    );
+  };
+
+  const stopAutoScroll = () => {
+    if (autoScrollFrame.current == null) return;
+    window.cancelAnimationFrame(autoScrollFrame.current);
+    autoScrollFrame.current = null;
+  };
+
+  const tickAutoScroll = () => {
+    autoScrollFrame.current = null;
+    if (!dragStateRef.current || !dragClientPoint.current) return;
+
+    const { x, y } = dragClientPoint.current;
+    const viewportHeight = window.innerHeight;
+    let scrollY = 0;
+
+    if (y < DRAG_EDGE_SCROLL_PX) {
+      scrollY = -Math.ceil(((DRAG_EDGE_SCROLL_PX - y) / DRAG_EDGE_SCROLL_PX) * DRAG_EDGE_SCROLL_MAX_PX);
+    } else if (y > viewportHeight - DRAG_EDGE_SCROLL_PX) {
+      scrollY = Math.ceil(((y - (viewportHeight - DRAG_EDGE_SCROLL_PX)) / DRAG_EDGE_SCROLL_PX) * DRAG_EDGE_SCROLL_MAX_PX);
+    }
+
+    if (scrollY !== 0) {
+      window.scrollBy({ top: scrollY, behavior: "auto" });
+      updateDragTargetAtPoint(x, y);
+      autoScrollFrame.current = window.requestAnimationFrame(tickAutoScroll);
+    }
+  };
+
+  const queueAutoScroll = () => {
+    if (autoScrollFrame.current != null) return;
+    autoScrollFrame.current = window.requestAnimationFrame(tickAutoScroll);
+  };
+
   const startExercisePress = (sequenceNo: number, e: PointerEvent<HTMLDivElement>) => {
     if (e.button !== 0 || isInteractivePressTarget(e.target)) return;
     const cardEl = e.currentTarget;
@@ -701,7 +748,9 @@ export default function LogPage() {
     longPressTimer.current = setTimeout(() => {
       if (dragPointer.current?.id !== e.pointerId) return;
       cardEl.setPointerCapture(e.pointerId);
+      dragClientPoint.current = { x: e.clientX, y: e.clientY };
       updateDragState({ sequenceNo, overSequenceNo: sequenceNo });
+      queueAutoScroll();
       if (navigator.vibrate) navigator.vibrate(8);
     }, LONG_PRESS_MS);
   };
@@ -723,20 +772,17 @@ export default function LogPage() {
     }
 
     e.preventDefault();
-    const overSequenceNo = findSequenceAtPoint(e.clientX, e.clientY);
-    if (overSequenceNo != null) {
-      updateDragState((current) =>
-        current && current.overSequenceNo !== overSequenceNo
-          ? { ...current, overSequenceNo }
-          : current
-      );
-    }
+    dragClientPoint.current = { x: e.clientX, y: e.clientY };
+    updateDragTargetAtPoint(e.clientX, e.clientY);
+    queueAutoScroll();
   };
 
   const finishExercisePress = (e: PointerEvent<HTMLDivElement>) => {
     const pointer = dragPointer.current;
     clearLongPress();
+    stopAutoScroll();
     dragPointer.current = null;
+    dragClientPoint.current = null;
 
     const currentDrag = dragStateRef.current;
     updateDragState(null);
@@ -748,7 +794,9 @@ export default function LogPage() {
 
   const cancelExercisePress = () => {
     clearLongPress();
+    stopAutoScroll();
     dragPointer.current = null;
+    dragClientPoint.current = null;
     updateDragState(null);
   };
 
@@ -1276,7 +1324,10 @@ export default function LogPage() {
   }, []);
 
   useEffect(() => {
-    return () => clearLongPress();
+    return () => {
+      clearLongPress();
+      stopAutoScroll();
+    };
   }, []);
 
   useEffect(() => {
