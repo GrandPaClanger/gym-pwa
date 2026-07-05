@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import type { PointerEvent } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { installAuthRecovery, localSignOut } from "@/lib/authRecovery";
@@ -67,8 +68,15 @@ type ActiveExerciseEdit = {
   label: string;
 } | null;
 
+type DragState = {
+  sequenceNo: number;
+  overSequenceNo: number;
+} | null;
+
 const REP_MIN = 8;
 const REP_MAX = 20;
+const LONG_PRESS_MS = 450;
+const DRAG_CANCEL_PX = 8;
 
 const todayIso = () => new Date().toISOString().slice(0, 10);
 const rowKey = (planDate: string, seq: number) => `${planDate}-${seq}`;
@@ -156,6 +164,9 @@ export default function LogPage() {
   const [exNoteMsg, setExNoteMsg] = useState("");
   const [activeExerciseEdit, setActiveExerciseEdit] = useState<ActiveExerciseEdit>(null);
   const [keyboardInset, setKeyboardInset] = useState(0);
+  const [dragState, setDragState] = useState<DragState>(null);
+  const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const dragPointer = useRef<{ id: number; sequenceNo: number; startX: number; startY: number } | null>(null);
 
   // max load stats: exercise_id -> { max_load_kg, times_at_max }
   const [maxLoadStats, setMaxLoadStats] = useState<Record<number, { max_load_kg: number; times_at_max: number }>>({});
@@ -547,6 +558,191 @@ export default function LogPage() {
     await flushAutosave(active.key, true);
     if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
     setActiveExerciseEdit(null);
+  };
+
+  const remapLocalEditsAfterReorder = (beforeRows: Row[], afterRows: Row[]) => {
+    const planDate = todayIso();
+    const nextSeqByOldSeq = new Map<number, number>();
+    beforeRows.forEach((row, index) => {
+      const nextSeq = afterRows[index]?.sequence_no;
+      if (nextSeq != null) nextSeqByOldSeq.set(row.sequence_no, nextSeq);
+    });
+
+    const remap = <T,>(values: Record<string, T>) => {
+      const next: Record<string, T> = {};
+      for (const [key, value] of Object.entries(values)) {
+        const row = beforeRows.find((candidate) => rowKey(planDate, candidate.sequence_no) === key);
+        if (!row) {
+          next[key] = value;
+          continue;
+        }
+
+        const nextSeq = nextSeqByOldSeq.get(row.sequence_no);
+        if (nextSeq == null) continue;
+        next[rowKey(planDate, nextSeq)] = value;
+      }
+      return next;
+    };
+
+    setSets((prev) => remap(prev));
+    setReps((prev) => remap(prev));
+    setLoads((prev) => remap(prev));
+    setDurationsMin((prev) => remap(prev));
+    setCaloriesKcal((prev) => remap(prev));
+    setSwapPick((prev) => remap(prev));
+  };
+
+  const moveRowToSequence = async (fromSequenceNo: number, toSequenceNo: number) => {
+    if (fromSequenceNo === toSequenceNo) return;
+
+    setMsg("");
+    const fromIndex = rows.findIndex((row) => row.sequence_no === fromSequenceNo);
+    const toIndex = rows.findIndex((row) => row.sequence_no === toSequenceNo);
+    if (fromIndex < 0 || toIndex < 0) return;
+
+    const ordered = [...rows];
+    const [moved] = ordered.splice(fromIndex, 1);
+    ordered.splice(toIndex, 0, moved);
+    const resequenced = ordered.map<Row>((row, index) => ({
+      ...row,
+      sequence_no: (index + 1) * 10,
+    }));
+
+    for (const row of rows) {
+      const ok = await flushAutosave(rowKey(todayIso(), row.sequence_no));
+      if (!ok) return;
+    }
+
+    if (mode === "adhoc") {
+      remapLocalEditsAfterReorder(ordered, resequenced);
+      setRows(resequenced);
+      setMsg("Exercises reordered.");
+      return;
+    }
+
+    const pid = await requirePlanId();
+    if (!pid) return setMsg("No plan loaded. Click Refresh plan.");
+
+    const temporaryBase = rows.reduce((max, row) => Math.max(max, row.sequence_no), 0) + rows.length * 10 + 10000;
+    const temporarySeqs = ordered.map((row, index) => ({
+      original: row.sequence_no,
+      temporary: temporaryBase + (index + 1) * 10,
+      final: (index + 1) * 10,
+    }));
+
+    for (const seq of temporarySeqs) {
+      const { error } = await supabase
+        .from("workout_plan_item")
+        .update({ sequence_no: seq.temporary })
+        .eq("plan_id", pid)
+        .eq("sequence_no", seq.original);
+
+      if (error) {
+        setMsg(error.message);
+        await loadTodayPlanRows();
+        return;
+      }
+    }
+
+    for (const seq of temporarySeqs) {
+      const { error } = await supabase
+        .from("workout_plan_item")
+        .update({ sequence_no: seq.final })
+        .eq("plan_id", pid)
+        .eq("sequence_no", seq.temporary);
+
+      if (error) {
+        setMsg(error.message);
+        await loadTodayPlanRows();
+        return;
+      }
+    }
+
+    remapLocalEditsAfterReorder(ordered, resequenced);
+    setRows(resequenced);
+    setMsg("Exercises reordered.");
+  };
+
+  const clearLongPress = () => {
+    if (!longPressTimer.current) return;
+    clearTimeout(longPressTimer.current);
+    longPressTimer.current = null;
+  };
+
+  const findSequenceAtPoint = (clientX: number, clientY: number) => {
+    const el = document.elementFromPoint(clientX, clientY);
+    const card = el?.closest("[data-exercise-sequence]");
+    const raw = card?.getAttribute("data-exercise-sequence");
+    const sequenceNo = raw == null ? NaN : Number(raw);
+    return Number.isFinite(sequenceNo) ? sequenceNo : null;
+  };
+
+  const isInteractivePressTarget = (target: EventTarget | null) =>
+    target instanceof Element &&
+    !!target.closest("button, input, select, textarea, summary, a, label");
+
+  const startExercisePress = (sequenceNo: number, e: PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0 || isInteractivePressTarget(e.target)) return;
+    const cardEl = e.currentTarget;
+    clearLongPress();
+    dragPointer.current = {
+      id: e.pointerId,
+      sequenceNo,
+      startX: e.clientX,
+      startY: e.clientY,
+    };
+    longPressTimer.current = setTimeout(() => {
+      if (dragPointer.current?.id !== e.pointerId) return;
+      cardEl.setPointerCapture(e.pointerId);
+      setDragState({ sequenceNo, overSequenceNo: sequenceNo });
+      if (navigator.vibrate) navigator.vibrate(8);
+    }, LONG_PRESS_MS);
+  };
+
+  const moveExercisePress = (e: PointerEvent<HTMLDivElement>) => {
+    const pointer = dragPointer.current;
+    if (!pointer || pointer.id !== e.pointerId) return;
+
+    const movedEnough =
+      Math.abs(e.clientX - pointer.startX) > DRAG_CANCEL_PX ||
+      Math.abs(e.clientY - pointer.startY) > DRAG_CANCEL_PX;
+
+    if (!dragState) {
+      if (movedEnough) {
+        clearLongPress();
+        dragPointer.current = null;
+      }
+      return;
+    }
+
+    e.preventDefault();
+    const overSequenceNo = findSequenceAtPoint(e.clientX, e.clientY);
+    if (overSequenceNo != null) {
+      setDragState((current) =>
+        current && current.overSequenceNo !== overSequenceNo
+          ? { ...current, overSequenceNo }
+          : current
+      );
+    }
+  };
+
+  const finishExercisePress = (e: PointerEvent<HTMLDivElement>) => {
+    const pointer = dragPointer.current;
+    clearLongPress();
+    dragPointer.current = null;
+
+    const currentDrag = dragState;
+    setDragState(null);
+
+    if (pointer?.id !== e.pointerId || !currentDrag) return;
+    e.preventDefault();
+    void moveRowToSequence(currentDrag.sequenceNo, currentDrag.overSequenceNo);
+  };
+
+  const cancelExercisePress = () => {
+    clearLongPress();
+    dragPointer.current = null;
+    setDragState(null);
   };
 
   const addExercise = async () => {
@@ -1073,6 +1269,10 @@ export default function LogPage() {
   }, []);
 
   useEffect(() => {
+    return () => clearLongPress();
+  }, []);
+
+  useEffect(() => {
     if (!isAuthed) return;
     (async () => {
       try {
@@ -1341,18 +1541,45 @@ export default function LogPage() {
 
             const exId = r.exercise_id ?? null;
             const exNoteVal = exId ? (exerciseNotes[exId] ?? "") : "";
+            const isDragging = dragState?.sequenceNo === r.sequence_no;
+            const isDragTarget =
+              dragState != null &&
+              dragState.sequenceNo !== r.sequence_no &&
+              dragState.overSequenceNo === r.sequence_no;
 
             return (
-              <div key={k} className="card space-y-2 sm:space-y-3">
+              <div
+                key={k}
+                data-exercise-sequence={r.sequence_no}
+                onPointerDown={(e) => startExercisePress(r.sequence_no, e)}
+                onPointerMove={moveExercisePress}
+                onPointerUp={finishExercisePress}
+                onPointerCancel={cancelExercisePress}
+                className={[
+                  "card space-y-2 select-none transition sm:space-y-3",
+                  dragState ? "touch-none" : "touch-pan-y",
+                  isDragging ? "scale-[0.99] border-emerald-400 bg-slate-700 shadow-lg shadow-emerald-950/30" : "",
+                  isDragTarget ? "ring-2 ring-emerald-400 ring-offset-2 ring-offset-slate-900" : "",
+                ].filter(Boolean).join(" ")}
+                aria-grabbed={isDragging}
+              >
                 {/* Card header */}
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
-                      <span className="text-xs text-slate-500 font-mono">{r.sequence_no}</span>
+                      <span
+                        className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-slate-600 bg-slate-900/50 text-xs text-slate-400"
+                        title="Long press and drag to reorder"
+                      >
+                        {r.sequence_no}
+                      </span>
                       <h3 className="font-semibold text-slate-100 truncate">{r.exercise_name}</h3>
                       <span className={typeBadgeClass(r.exercise_type)}>
                         {typeLabel(r.exercise_type)}
                       </span>
+                      {isDragging && (
+                        <span className="text-xs font-medium text-emerald-300">Move exercise</span>
+                      )}
                     </div>
                   </div>
                   <button
