@@ -165,6 +165,7 @@ export default function LogPage() {
   const [activeExerciseEdit, setActiveExerciseEdit] = useState<ActiveExerciseEdit>(null);
   const [keyboardInset, setKeyboardInset] = useState(0);
   const [dragState, setDragState] = useState<DragState>(null);
+  const dragStateRef = useRef<DragState>(null);
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const dragPointer = useRef<{ id: number; sequenceNo: number; startX: number; startY: number } | null>(null);
 
@@ -681,6 +682,12 @@ export default function LogPage() {
     target instanceof Element &&
     !!target.closest("button, input, select, textarea, summary, a, label");
 
+  const updateDragState = (next: DragState | ((current: DragState) => DragState)) => {
+    const resolved = typeof next === "function" ? next(dragStateRef.current) : next;
+    dragStateRef.current = resolved;
+    setDragState(resolved);
+  };
+
   const startExercisePress = (sequenceNo: number, e: PointerEvent<HTMLDivElement>) => {
     if (e.button !== 0 || isInteractivePressTarget(e.target)) return;
     const cardEl = e.currentTarget;
@@ -694,7 +701,7 @@ export default function LogPage() {
     longPressTimer.current = setTimeout(() => {
       if (dragPointer.current?.id !== e.pointerId) return;
       cardEl.setPointerCapture(e.pointerId);
-      setDragState({ sequenceNo, overSequenceNo: sequenceNo });
+      updateDragState({ sequenceNo, overSequenceNo: sequenceNo });
       if (navigator.vibrate) navigator.vibrate(8);
     }, LONG_PRESS_MS);
   };
@@ -707,7 +714,7 @@ export default function LogPage() {
       Math.abs(e.clientX - pointer.startX) > DRAG_CANCEL_PX ||
       Math.abs(e.clientY - pointer.startY) > DRAG_CANCEL_PX;
 
-    if (!dragState) {
+    if (!dragStateRef.current) {
       if (movedEnough) {
         clearLongPress();
         dragPointer.current = null;
@@ -718,7 +725,7 @@ export default function LogPage() {
     e.preventDefault();
     const overSequenceNo = findSequenceAtPoint(e.clientX, e.clientY);
     if (overSequenceNo != null) {
-      setDragState((current) =>
+      updateDragState((current) =>
         current && current.overSequenceNo !== overSequenceNo
           ? { ...current, overSequenceNo }
           : current
@@ -731,8 +738,8 @@ export default function LogPage() {
     clearLongPress();
     dragPointer.current = null;
 
-    const currentDrag = dragState;
-    setDragState(null);
+    const currentDrag = dragStateRef.current;
+    updateDragState(null);
 
     if (pointer?.id !== e.pointerId || !currentDrag) return;
     e.preventDefault();
@@ -742,7 +749,7 @@ export default function LogPage() {
   const cancelExercisePress = () => {
     clearLongPress();
     dragPointer.current = null;
-    setDragState(null);
+    updateDragState(null);
   };
 
   const addExercise = async () => {
@@ -1271,6 +1278,21 @@ export default function LogPage() {
   useEffect(() => {
     return () => clearLongPress();
   }, []);
+
+  useEffect(() => {
+    if (!dragState) return;
+
+    const previousOverflow = document.body.style.overflow;
+    const preventScroll = (event: TouchEvent) => event.preventDefault();
+
+    document.body.style.overflow = "hidden";
+    document.addEventListener("touchmove", preventScroll, { passive: false });
+
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.removeEventListener("touchmove", preventScroll);
+    };
+  }, [dragState]);
 
   useEffect(() => {
     if (!isAuthed) return;
