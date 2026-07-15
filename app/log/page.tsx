@@ -7,6 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { installAuthRecovery, localSignOut } from "@/lib/authRecovery";
 import { ExerciseGroup, readExerciseGroups } from "@/lib/exerciseGroups";
+import { noNumericAutofillProps } from "@/lib/inputAttributes";
 
 type Mode = "plan" | "adhoc";
 
@@ -1507,6 +1508,7 @@ export default function LogPage() {
             <input
               type="text"
               inputMode="numeric"
+              {...noNumericAutofillProps}
               value={String(sessionDurationMin)}
               onChange={(e) => setSessionDurationMin(Number(parseNumberOrBlank(e.target.value) || 0))}
               className="input-sm w-16 text-center"
@@ -1704,6 +1706,7 @@ export default function LogPage() {
                       <input
                         type="text"
                         inputMode="numeric"
+                        {...noNumericAutofillProps}
                         enterKeyHint="done"
                         value={showReps === "" ? "" : String(showReps)}
                         onFocus={() => focusExerciseEdit(k, `${r.exercise_name} reps`)}
@@ -1721,6 +1724,7 @@ export default function LogPage() {
                       <input
                         type="text"
                         inputMode="decimal"
+                        {...noNumericAutofillProps}
                         enterKeyHint="done"
                         value={showLoad}
                         onFocus={() => focusExerciseEdit(k, `${r.exercise_name} load`)}
@@ -1738,6 +1742,7 @@ export default function LogPage() {
                       <input
                         type="text"
                         inputMode="numeric"
+                        {...noNumericAutofillProps}
                         enterKeyHint="done"
                         value={showSets === "" ? "" : String(showSets)}
                         onFocus={() => focusExerciseEdit(k, `${r.exercise_name} sets`)}
@@ -1765,6 +1770,7 @@ export default function LogPage() {
                       <input
                         type="text"
                         inputMode="numeric"
+                        {...noNumericAutofillProps}
                         enterKeyHint="done"
                         value={showMin === "" ? "" : String(showMin)}
                         onFocus={() => focusExerciseEdit(k, `${r.exercise_name} duration`)}
@@ -1784,6 +1790,7 @@ export default function LogPage() {
                         <input
                           type="text"
                           inputMode="numeric"
+                          {...noNumericAutofillProps}
                           enterKeyHint="done"
                           value={showCalories === "" ? "" : String(showCalories)}
                           onFocus={() => focusExerciseEdit(k, `${r.exercise_name} calories`)}

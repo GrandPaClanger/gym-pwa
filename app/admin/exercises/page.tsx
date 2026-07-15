@@ -10,6 +10,7 @@ import {
   readExerciseGroups,
   updateExerciseGroup,
 } from "@/lib/exerciseGroups";
+import { noNumericAutofillProps } from "@/lib/inputAttributes";
 
 type Exercise = {
   exercise_id: number;
@@ -777,6 +778,7 @@ export default function AdminExercisesPage() {
                             onChange={(e) => setMapBaseWeight(parseNumberOrBlank(e.target.value))}
                             placeholder="1"
                             inputMode="decimal"
+                            {...noNumericAutofillProps}
                             className="input"
                           />
                         </div>
