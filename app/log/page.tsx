@@ -94,6 +94,14 @@ const typeBadgeClass = (exerciseType: number) => (isClassType(exerciseType) ? "b
 const targetSetsFor = (exerciseType: number) => (isStrengthType(exerciseType) ? 3 : 1);
 const targetRepsFor = (exerciseType: number) => (isStrengthType(exerciseType) ? 10 : 1);
 const isCoreGroup = (group: ExerciseGroup) => normName(group.name) === "core";
+const exerciseCategorySuffixes: Record<string, string> = {
+  push: "PU",
+  pull: "PL",
+  legs: "L",
+  cardio: "CA",
+  core: "CO",
+};
+const exerciseCategoryPriority = ["core", "push", "pull", "legs", "cardio"];
 const isPilatesClass = (exercise: Exercise) => isClassType(exercise.exercise_type) && normName(exercise.canonical_name) === "pilates";
 
 function parseNumberOrBlank(v: string): number | "" {
@@ -168,6 +176,7 @@ export default function LogPage() {
   const [activeExerciseEdit, setActiveExerciseEdit] = useState<ActiveExerciseEdit>(null);
   const [keyboardInset, setKeyboardInset] = useState(0);
   const [dragState, setDragState] = useState<DragState>(null);
+  const [exercisesCollapsed, setExercisesCollapsed] = useState(false);
   const dragStateRef = useRef<DragState>(null);
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const dragPointer = useRef<{ id: number; sequenceNo: number; startX: number; startY: number } | null>(null);
@@ -289,6 +298,43 @@ export default function LogPage() {
     return m;
   }, [exerciseList]);
 
+  const exerciseCategorySuffixById = useMemo(() => {
+    const categoriesByExerciseId = new Map<number, Set<string>>();
+
+    for (const group of groups) {
+      const category = normName(group.name);
+      if (!exerciseCategorySuffixes[category]) continue;
+
+      for (const exerciseId of group.exerciseIds) {
+        const categories = categoriesByExerciseId.get(exerciseId) ?? new Set<string>();
+        categories.add(category);
+        categoriesByExerciseId.set(exerciseId, categories);
+      }
+    }
+
+    const suffixById = new Map<number, string>();
+    for (const exercise of exerciseList) {
+      const categories = categoriesByExerciseId.get(exercise.exercise_id) ?? new Set<string>();
+      const category = isCardioType(exercise.exercise_type)
+        ? "cardio"
+        : exerciseCategoryPriority.find((candidate) => categories.has(candidate));
+
+      if (category) suffixById.set(exercise.exercise_id, exerciseCategorySuffixes[category]);
+    }
+
+    return suffixById;
+  }, [exerciseList, groups]);
+
+  const addExerciseOptionLabel = (exercise: Exercise) => {
+    const suffix = exerciseCategorySuffixById.get(exercise.exercise_id);
+    return [
+      exercise.canonical_name,
+      suffix ? `(${suffix})` : "",
+      exercise.is_manual_only ? "(manual)" : "",
+      exercise.is_distance_based ? "(distance)" : "",
+    ].filter(Boolean).join(" ");
+  };
+
   const isDistanceBasedRow = useCallback((r: Row) => {
     if (!isCardioType(r.exercise_type)) return false;
 
@@ -334,6 +380,35 @@ export default function LogPage() {
   const getRowDefaultLoad = (r: Row) => {
     if (r.target_load_kg != null) return Number(r.target_load_kg);
     return r.suggested_load_kg ?? null;
+  };
+
+  const getExerciseSummary = (r: Row) => {
+    const k = rowKey(todayIso(), r.sequence_no);
+
+    if (isTimedType(r.exercise_type)) {
+      const defaultMins = Math.round((r.target_duration_sec ?? 0) / 60);
+      const minsRaw = (durationsMin[k] ?? defaultMins) as number | "";
+      const mins = minsRaw === "" ? defaultMins : Number(minsRaw);
+      const summary = [`${Math.max(0, Math.round(mins))} min`];
+      if (isDistanceBasedRow(r)) {
+        const calories = asIntOrNull(caloriesKcal[k] ?? "");
+        if (calories != null) summary.push(`${calories} kcal`);
+      }
+      return summary.join(" / ");
+    }
+
+    const defaultSets = r.target_sets ?? 3;
+    const defaultReps = r.target_reps ?? 10;
+    const setCountRaw = (sets[k] ?? defaultSets) as number | "";
+    const repsRaw = (reps[k] ?? defaultReps) as number | "";
+    const setCount = setCountRaw === "" ? defaultSets : Number(setCountRaw);
+    const repCount = repsRaw === "" ? defaultReps : Number(repsRaw);
+    const defaultLoad = getRowDefaultLoad(r);
+    const loadText = loads[k] ?? (defaultLoad == null ? "" : String(defaultLoad));
+    const load = parseDecimalOrNull(loadText);
+    const loadSummary = load == null ? "bodyweight" : `${load} kg`;
+
+    return `${Math.max(1, Math.round(setCount))} sets x ${clampReps(repCount)} reps @ ${loadSummary}`;
   };
 
   const clearLocalEditsForKey = (k: string) => {
@@ -491,6 +566,7 @@ export default function LogPage() {
     setDurationsMin({});
     setCaloriesKcal({});
     setSwapPick({});
+    setExercisesCollapsed(false);
   };
 
   const refreshPlan = async () => {
@@ -1541,9 +1617,7 @@ export default function LogPage() {
               <option value="">Select exercise…</option>
               {filteredAddExercises.map((e) => (
                 <option key={e.exercise_id} value={e.exercise_id}>
-                  {e.canonical_name}
-                  {e.is_manual_only ? " (manual)" : ""}
-                  {e.is_distance_based ? " (distance)" : ""}
+                  {addExerciseOptionLabel(e)}
                 </option>
               ))}
             </select>
@@ -1599,6 +1673,30 @@ export default function LogPage() {
             </div>
           )}
 
+          {rows.length > 0 && (
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <p className="section-title">{rows.length} exercises</p>
+              <div className="flex gap-1.5 sm:gap-2">
+                <button
+                  type="button"
+                  onClick={() => setExercisesCollapsed(true)}
+                  className="btn-secondary"
+                  disabled={exercisesCollapsed}
+                >
+                  Collapse all
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setExercisesCollapsed(false)}
+                  className="btn-ghost"
+                  disabled={!exercisesCollapsed}
+                >
+                  Expand all
+                </button>
+              </div>
+            </div>
+          )}
+
           {rows.map((r) => {
             const k = rowKey(todayIso(), r.sequence_no);
 
@@ -1621,6 +1719,8 @@ export default function LogPage() {
               dragState != null &&
               dragState.sequenceNo !== r.sequence_no &&
               dragState.overSequenceNo === r.sequence_no;
+            const isCollapsed = exercisesCollapsed;
+            const exerciseSummary = getExerciseSummary(r);
 
             return (
               <div
@@ -1635,6 +1735,7 @@ export default function LogPage() {
                   dragState ? "touch-none" : "touch-pan-y",
                   isDragging ? "scale-[0.99] border-emerald-400 bg-slate-700 shadow-lg shadow-emerald-950/30" : "",
                   isDragTarget ? "ring-2 ring-emerald-400 ring-offset-2 ring-offset-slate-900" : "",
+                  isCollapsed ? "py-2 sm:py-3" : "",
                 ].filter(Boolean).join(" ")}
                 aria-grabbed={isDragging}
               >
@@ -1656,15 +1757,23 @@ export default function LogPage() {
                         <span className="text-xs font-medium text-emerald-300">Move exercise</span>
                       )}
                     </div>
+                    {isCollapsed && (
+                      <p className="mt-1 text-sm text-slate-300">
+                        {exerciseSummary}
+                      </p>
+                    )}
                   </div>
-                  <button
-                    onClick={() => void removeRow(r.sequence_no)}
-                    className="btn-danger shrink-0 text-xs px-2 py-1"
-                  >
-                    Remove
-                  </button>
+                  <div className="flex shrink-0 gap-1.5">
+                    <button
+                      onClick={() => void removeRow(r.sequence_no)}
+                      className="btn-danger text-xs px-2 py-1"
+                    >
+                      Remove
+                    </button>
+                  </div>
                 </div>
 
+                <div className={isCollapsed ? "hidden" : "space-y-2 sm:space-y-3"}>
                 {/* Max load stats for progressive overload guidance */}
                 {isStrengthType(r.exercise_type) && exId != null && maxLoadStats[exId] != null && (
                   <div className="flex items-center justify-center gap-2 text-xs">
@@ -1833,6 +1942,7 @@ export default function LogPage() {
                     ))}
                   </select>
                 </details>
+                </div>
               </div>
             );
           })}
