@@ -226,13 +226,13 @@ export default function LogPage() {
     setMsg(error ? error.message : "Check your email for the magic link.");
   };
 
-  const signOut = () => {
+  const signOut = async () => {
     setIsAuthed(false);
     setRows([]);
     setGroups([]);
     setAddGroupId("");
     setMsg("");
-    void localSignOut();
+    await localSignOut();
     router.replace("/log");
   };
 

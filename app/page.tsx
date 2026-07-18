@@ -389,13 +389,13 @@ export default function HomePage() {
     setMsg("");
   };
 
-  const signOut = () => {
+  const signOut = async () => {
     setIsAdmin(false);
     setIsAuthed(false);
     setRows([]);
     setMsg("");
-    void localSignOut();
-    router.push("/log");
+    await localSignOut();
+    router.replace("/log");
   };
 
   useEffect(() => {
