@@ -1935,9 +1935,7 @@ export default function LogPage() {
                     <option value="">Swap…</option>
                     {exerciseList.map((e) => (
                       <option key={e.exercise_id} value={e.exercise_id}>
-                        {e.canonical_name}
-                        {e.is_manual_only ? " (manual)" : ""}
-                        {e.is_distance_based ? " (distance)" : ""}
+                        {addExerciseOptionLabel(e)}
                       </option>
                     ))}
                   </select>
