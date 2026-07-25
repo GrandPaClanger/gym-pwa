@@ -77,6 +77,7 @@ type DragState = {
 const REP_MIN = 8;
 const REP_MAX = 20;
 const LONG_PRESS_MS = 450;
+const DOUBLE_TAP_MS = 320;
 const DRAG_CANCEL_PX = 8;
 const DRAG_EDGE_SCROLL_PX = 96;
 const DRAG_EDGE_SCROLL_MAX_PX = 18;
@@ -84,6 +85,8 @@ const DRAG_EDGE_SCROLL_MAX_PX = 18;
 const todayIso = () => new Date().toISOString().slice(0, 10);
 const rowKey = (planDate: string, seq: number) => `${planDate}-${seq}`;
 const normName = (s: string) => (s ?? "").trim().toLowerCase();
+const isIPhone = () =>
+  typeof navigator !== "undefined" && /\biPhone\b/i.test(navigator.userAgent);
 const isCardioType = (exerciseType: number) => exerciseType === 2;
 const isClassType = (exerciseType: number) => exerciseType === 4;
 const isTimedType = (exerciseType: number) => isCardioType(exerciseType) || isClassType(exerciseType);
@@ -181,6 +184,7 @@ export default function LogPage() {
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const dragPointer = useRef<{ id: number; sequenceNo: number; startX: number; startY: number } | null>(null);
   const dragClientPoint = useRef<{ x: number; y: number } | null>(null);
+  const lastCollapsedExerciseTap = useRef(0);
   const autoScrollFrame = useRef<number | null>(null);
 
   // max load stats: exercise_id -> { max_load_kg, times_at_max }
@@ -824,6 +828,7 @@ export default function LogPage() {
     };
     longPressTimer.current = setTimeout(() => {
       if (dragPointer.current?.id !== e.pointerId) return;
+      longPressTimer.current = null;
       cardEl.setPointerCapture(e.pointerId);
       dragClientPoint.current = { x: e.clientX, y: e.clientY };
       updateDragState({ sequenceNo, overSequenceNo: sequenceNo });
@@ -864,7 +869,24 @@ export default function LogPage() {
     const currentDrag = dragStateRef.current;
     updateDragState(null);
 
-    if (pointer?.id !== e.pointerId || !currentDrag) return;
+    if (pointer?.id !== e.pointerId) return;
+    if (!currentDrag) {
+      const movedEnough =
+        Math.abs(e.clientX - pointer.startX) > DRAG_CANCEL_PX ||
+        Math.abs(e.clientY - pointer.startY) > DRAG_CANCEL_PX;
+
+      if (exercisesCollapsed && e.pointerType === "touch" && isIPhone() && !movedEnough) {
+        const now = Date.now();
+        if (now - lastCollapsedExerciseTap.current <= DOUBLE_TAP_MS) {
+          lastCollapsedExerciseTap.current = 0;
+          setExercisesCollapsed(false);
+          if (navigator.vibrate) navigator.vibrate(8);
+        } else {
+          lastCollapsedExerciseTap.current = now;
+        }
+      }
+      return;
+    }
     e.preventDefault();
     void moveRowToSequence(currentDrag.sequenceNo, currentDrag.overSequenceNo);
   };
